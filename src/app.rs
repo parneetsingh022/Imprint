@@ -1609,7 +1609,7 @@ impl ImprintApp {
     /// Renders the interactive crop editor tool.
     fn render_crop_editor(&mut self, ui: &mut Ui) {
         let available_size = ui.available_size();
-        let (rect, _response) =
+        let (rect, response) =
             ui.allocate_exact_size(available_size, egui::Sense::click_and_drag());
         let painter = ui.painter_at(rect);
 
@@ -1741,7 +1741,7 @@ impl ImprintApp {
             let is_inside = crop_rect.contains(pos);
 
             // Wheel zoom when hovering over work area
-            if work_rect.contains(pos) {
+            if response.hovered() && work_rect.contains(pos) {
                 let scroll = ui.input(|i| i.smooth_scroll_delta.y);
                 if scroll.abs() > 0.0 {
                     let zoom_factor = if scroll > 0.0 { 0.96 } else { 1.04 };
@@ -1975,11 +1975,13 @@ impl ImprintApp {
             self.canvas_pan += response.drag_delta();
         }
 
-        // Zoom handling via mouse wheel scroll
-        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-        if scroll.abs() > 0.0 {
-            let factor = (1.0 + scroll * 0.002).clamp(0.8, 1.25);
-            self.canvas_zoom = (self.canvas_zoom * factor).clamp(0.2, 5.0);
+        // Zoom handling via mouse wheel scroll (only when cursor is hovering over the canvas)
+        if response.hovered() {
+            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+            if scroll.abs() > 0.0 {
+                let factor = (1.0 + scroll * 0.002).clamp(0.8, 1.25);
+                self.canvas_zoom = (self.canvas_zoom * factor).clamp(0.2, 5.0);
+            }
         }
 
         let painter = ui.painter_at(rect);
@@ -2548,5 +2550,91 @@ mod tests {
         assert!(app.show_margins);
         assert!(app.show_dimensions);
         assert!(app.show_biometric_guides);
+    }
+
+    #[test]
+    fn test_sidebar_scroll_does_not_zoom_sheet_canvas() {
+        let mut app = ImprintApp::default();
+        let initial_zoom = app.canvas_zoom;
+
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 800.0));
+
+        // Frame 1: Move pointer onto the right sidebar area (x=1100, y=400)
+        let mut raw1 = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        raw1.events
+            .push(egui::Event::PointerMoved(Pos2::new(1100.0, 400.0)));
+        let mut out1 = ctx.run_ui(raw1, |ui| {
+            app.render_properties_panel(ui);
+            app.render_central_canvas(ui);
+        });
+        out1.textures_delta.clear();
+
+        // Frame 2: Mouse wheel scroll over sidebar
+        let mut raw2 = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        raw2.events.push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: Vec2::new(0.0, 50.0),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+        });
+
+        let mut output = ctx.run_ui(raw2, |ui| {
+            app.render_properties_panel(ui);
+            app.render_central_canvas(ui);
+        });
+        output.textures_delta.clear();
+
+        // Canvas zoom must remain unchanged because pointer was over the sidebar, not the canvas
+        assert_eq!(app.canvas_zoom, initial_zoom);
+    }
+
+    #[test]
+    fn test_canvas_scroll_zooms_sheet_canvas_when_hovered() {
+        let mut app = ImprintApp::default();
+        let initial_zoom = app.canvas_zoom;
+
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 800.0));
+
+        // Frame 1: Move pointer into central canvas
+        let mut raw1 = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        raw1.events
+            .push(egui::Event::PointerMoved(Pos2::new(500.0, 400.0)));
+        let mut out1 = ctx.run_ui(raw1, |ui| {
+            app.render_properties_panel(ui);
+            app.render_central_canvas(ui);
+        });
+        out1.textures_delta.clear();
+
+        // Frame 2: Mouse wheel scroll while hovering canvas
+        let mut raw2 = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        raw2.events.push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: Vec2::new(0.0, 50.0),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+        });
+
+        let mut output = ctx.run_ui(raw2, |ui| {
+            app.render_properties_panel(ui);
+            app.render_central_canvas(ui);
+        });
+        output.textures_delta.clear();
+
+        // Canvas zoom should have changed because pointer was hovering over the canvas
+        assert!(app.canvas_zoom > initial_zoom);
     }
 }
