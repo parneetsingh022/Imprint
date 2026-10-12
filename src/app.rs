@@ -134,8 +134,8 @@ impl Default for ImprintApp {
             photo: PhotoPreset::UsPassport
                 .dimensions()
                 .unwrap_or(DimensionsMm::new(50.8, 50.8)),
-            rows: 2,
-            cols: 2,
+            rows: 1,
+            cols: 1,
             margins: MarginsMm::new(2.0, 2.0, 2.0, 2.0),
             gutters: GuttersMm::new(2.0, 2.0),
             auto_center: true,
@@ -182,6 +182,12 @@ impl ImprintApp {
             self.active_tool = ToolMode::Select;
             self.texture_needs_update = true;
             self.status_message = "Workspace: Sheet Layout".to_string();
+
+            // Default to 1 row and 1 column if grid currently overflows the printable sheet
+            if compute_layout(&self.grid_config).is_err() {
+                self.grid_config.rows = 1;
+                self.grid_config.cols = 1;
+            }
         }
     }
 
@@ -253,6 +259,11 @@ impl ImprintApp {
                 self.texture_needs_update = true;
                 self.workspace = WorkspaceMode::PhotoEdit;
                 self.active_tool = ToolMode::Crop;
+                // Guard against overflow: default to 1 row and 1 col if current grid overflows
+                if compute_layout(&self.grid_config).is_err() {
+                    self.grid_config.rows = 1;
+                    self.grid_config.cols = 1;
+                }
             }
             Err(err) => {
                 self.status_message = format!("Failed to open image {}: {err}", path.display());
@@ -2312,6 +2323,9 @@ mod tests {
         assert_eq!(app.sheet_preset, SheetPreset::Photo4x6);
         assert_eq!(app.sheet_orientation, SheetOrientation::Portrait);
         assert_eq!(app.dpi, Dpi::STANDARD);
+        assert_eq!(app.grid_config.rows, 1);
+        assert_eq!(app.grid_config.cols, 1);
+        assert!(compute_layout(&app.grid_config).is_ok());
         assert!(app.loaded_image.is_none());
         assert_eq!(app.crop_area, CropArea::default());
         assert_eq!(app.export_target, ExportTarget::FullSheet);
@@ -2400,6 +2414,25 @@ mod tests {
         app.switch_to_sheet_layout();
         assert_eq!(app.workspace, WorkspaceMode::SheetLayout);
         assert_eq!(app.active_tool, ToolMode::Select);
+    }
+
+    #[test]
+    fn test_switch_to_sheet_layout_recovers_from_overflow() {
+        let mut app = ImprintApp::default();
+        // Force an overflow state
+        app.grid_config.rows = 8;
+        app.grid_config.cols = 8;
+        assert!(compute_layout(&app.grid_config).is_err());
+
+        app.switch_to_photo_edit();
+        assert_eq!(app.workspace, WorkspaceMode::PhotoEdit);
+
+        // When switching back to sheet layout, it should recover to 1x1 to prevent overflow
+        app.switch_to_sheet_layout();
+        assert_eq!(app.workspace, WorkspaceMode::SheetLayout);
+        assert_eq!(app.grid_config.rows, 1);
+        assert_eq!(app.grid_config.cols, 1);
+        assert!(compute_layout(&app.grid_config).is_ok());
     }
 
     #[test]

@@ -144,8 +144,8 @@ impl Default for GridConfig {
             sheet: DimensionsMm::new(101.6, 152.4),
             // US Passport 2x2 in (50.8 x 50.8 mm)
             photo: DimensionsMm::new(50.8, 50.8),
-            rows: 2,
-            cols: 2,
+            rows: 1,
+            cols: 1,
             margins: MarginsMm::new(0.0, 0.0, 0.0, 0.0),
             gutters: GuttersMm::new(0.0, 0.0),
             auto_center: true,
