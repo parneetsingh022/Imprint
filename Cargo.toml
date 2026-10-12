@@ -1,0 +1,9 @@
+[package]
+name = "imprint"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = "0.36.2"
+egui = "0.36.2"
+thiserror = "2.0"
