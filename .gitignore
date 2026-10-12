@@ -23,3 +23,4 @@ rustc-ice-*.txt
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 # Windows zone identifier metadata
 *:Zone.Identifier
+.DS_Store
