@@ -5,7 +5,7 @@ use std::path::Path;
 use eframe::egui::{self, Color32, Panel, Pos2, Rect, Stroke, Ui, Vec2};
 
 use crate::export::{ExportFormat, ExportOptions, ExportTarget, export_to_file};
-use crate::image_ops::{CropArea, LoadedImage, crop_and_resample, to_egui_color_image};
+use crate::image_ops::{CropArea, CropCorner, LoadedImage, crop_and_resample, to_egui_color_image};
 use crate::layout::{
     GridConfig, GuttersMm, LayoutGeometry, MarginsMm, calculate_max_fit, compute_layout,
 };
@@ -41,6 +41,15 @@ impl ToolMode {
     }
 }
 
+/// Active drag operation within the crop editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CropDragMode {
+    #[default]
+    None,
+    Move,
+    Corner(CropCorner),
+}
+
 /// The main Imprint application state.
 pub struct ImprintApp {
     // Presets & orientation
@@ -58,6 +67,7 @@ pub struct ImprintApp {
     pub source_texture: Option<egui::TextureHandle>,
     pub cropped_texture: Option<egui::TextureHandle>,
     pub texture_needs_update: bool,
+    pub crop_drag_mode: CropDragMode,
 
     // Export options
     pub export_target: ExportTarget,
@@ -107,6 +117,7 @@ impl Default for ImprintApp {
             source_texture: None,
             cropped_texture: None,
             texture_needs_update: false,
+            crop_drag_mode: CropDragMode::None,
             export_target: ExportTarget::FullSheet,
             export_format: ExportFormat::Pdf,
             active_tool: ToolMode::SelectPan,
@@ -297,41 +308,70 @@ impl ImprintApp {
 
     /// Updates textures for egui GPU rendering when the crop area or image changes.
     pub fn update_textures_if_needed(&mut self, ctx: &egui::Context) {
+        let Some(loaded) = &self.loaded_image else {
+            self.source_texture = None;
+            self.cropped_texture = None;
+            return;
+        };
+
+        // Source texture for crop tool (uploaded once, downsampled if extremely large for fast GPU display)
+        if self.source_texture.is_none() {
+            let max_dim = 2560;
+            let (w, h) = (loaded.width, loaded.height);
+            let display_rgba = if w > max_dim || h > max_dim {
+                let (dw, dh) = if w >= h {
+                    (
+                        max_dim,
+                        ((h as f32 / w as f32) * max_dim as f32).round() as u32,
+                    )
+                } else {
+                    (
+                        ((w as f32 / h as f32) * max_dim as f32).round() as u32,
+                        max_dim,
+                    )
+                };
+                ::image::imageops::resize(
+                    &loaded.original.to_rgba8(),
+                    dw,
+                    dh,
+                    ::image::imageops::FilterType::Triangle,
+                )
+            } else {
+                loaded.original.to_rgba8()
+            };
+            let color_img = to_egui_color_image(&display_rgba);
+            self.source_texture =
+                Some(ctx.load_texture("source_photo", color_img, egui::TextureOptions::LINEAR));
+        }
+
+        // PERFORMANCE: While in the crop tool, skip expensive CPU resampling!
+        // The crop tool renders the source texture with real-time vector overlay guides.
+        // We regenerate cropped_texture only when displaying the sheet layout.
+        if self.active_tool == ToolMode::Crop {
+            return;
+        }
+
         if !self.texture_needs_update {
             return;
         }
         self.texture_needs_update = false;
 
-        if let Some(loaded) = &self.loaded_image {
-            // Source texture for crop tool
-            if self.source_texture.is_none() {
-                let rgba = loaded.original.to_rgba8();
-                let color_img = to_egui_color_image(&rgba);
-                self.source_texture =
-                    Some(ctx.load_texture("source_photo", color_img, egui::TextureOptions::LINEAR));
-            }
-
-            // Cropped texture for slot previews
-            let aspect = self.grid_config.photo.aspect_ratio();
-            let (prev_w, prev_h) = if aspect >= 1.0 {
-                (512, (512.0 / aspect).round().max(16.0) as u32)
-            } else {
-                ((512.0 * aspect).round().max(16.0) as u32, 512)
-            };
-
-            if let Ok(cropped_rgba) =
-                crop_and_resample(&loaded.original, &self.crop_area, prev_w, prev_h)
-            {
-                let color_img = to_egui_color_image(&cropped_rgba);
-                self.cropped_texture = Some(ctx.load_texture(
-                    "cropped_slot_photo",
-                    color_img,
-                    egui::TextureOptions::LINEAR,
-                ));
-            }
+        let aspect = self.grid_config.photo.aspect_ratio();
+        let (prev_w, prev_h) = if aspect >= 1.0 {
+            (512, (512.0 / aspect).round().max(16.0) as u32)
         } else {
-            self.source_texture = None;
-            self.cropped_texture = None;
+            ((512.0 * aspect).round().max(16.0) as u32, 512)
+        };
+
+        if let Ok(cropped_rgba) =
+            crop_and_resample(&loaded.original, &self.crop_area, prev_w, prev_h)
+        {
+            let color_img = to_egui_color_image(&cropped_rgba);
+            self.cropped_texture = Some(ctx.load_texture(
+                "cropped_slot_photo",
+                color_img,
+                egui::TextureOptions::LINEAR,
+            ));
         }
     }
 
@@ -978,7 +1018,7 @@ impl ImprintApp {
     /// Renders the interactive crop editor tool.
     fn render_crop_editor(&mut self, ui: &mut Ui) {
         let available_size = ui.available_size();
-        let (rect, response) =
+        let (rect, _response) =
             ui.allocate_exact_size(available_size, egui::Sense::click_and_drag());
         let painter = ui.painter_at(rect);
 
@@ -1145,30 +1185,141 @@ impl ImprintApp {
             egui::StrokeKind::Outside,
         );
 
-        // Corner bracket handles
-        let corner_len = 16.0;
-        let corner_stroke = Stroke::new(3.5, Color32::WHITE);
-        // Top-left
+        // Handles geometry
+        let nw = crop_rect.left_top();
+        let ne = crop_rect.right_top();
+        let sw = crop_rect.left_bottom();
+        let se = crop_rect.right_bottom();
+        let handle_hit_radius = 24.0;
+
+        let mouse_pos = ui.input(|i| i.pointer.hover_pos());
+        let primary_down = ui.input(|i| i.pointer.primary_down());
+        let primary_pressed = ui.input(|i| i.pointer.primary_pressed());
+
+        if !primary_down {
+            self.crop_drag_mode = CropDragMode::None;
+        }
+
+        let mut is_near_nw = false;
+        let mut is_near_ne = false;
+        let mut is_near_sw = false;
+        let mut is_near_se = false;
+
+        if let Some(pos) = mouse_pos {
+            is_near_nw = (pos - nw).length() <= handle_hit_radius;
+            is_near_ne = (pos - ne).length() <= handle_hit_radius;
+            is_near_sw = (pos - sw).length() <= handle_hit_radius;
+            is_near_se = (pos - se).length() <= handle_hit_radius;
+            let is_inside = crop_rect.contains(pos);
+
+            // Wheel zoom when hovering over work area
+            if work_rect.contains(pos) {
+                let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+                if scroll.abs() > 0.0 {
+                    let zoom_factor = if scroll > 0.0 { 0.96 } else { 1.04 };
+                    self.zoom_crop(zoom_factor);
+                    ui.ctx().request_repaint();
+                }
+            }
+
+            // Initiate drag mode when mouse is clicked
+            if primary_pressed && work_rect.contains(pos) {
+                if is_near_nw {
+                    self.crop_drag_mode = CropDragMode::Corner(CropCorner::TopLeft);
+                } else if is_near_ne {
+                    self.crop_drag_mode = CropDragMode::Corner(CropCorner::TopRight);
+                } else if is_near_sw {
+                    self.crop_drag_mode = CropDragMode::Corner(CropCorner::BottomLeft);
+                } else if is_near_se {
+                    self.crop_drag_mode = CropDragMode::Corner(CropCorner::BottomRight);
+                } else if is_inside {
+                    self.crop_drag_mode = CropDragMode::Move;
+                }
+            }
+
+            // Set responsive cursor icon
+            match self.crop_drag_mode {
+                CropDragMode::Corner(CropCorner::TopLeft | CropCorner::BottomRight) => {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeNwSe);
+                }
+                CropDragMode::Corner(CropCorner::TopRight | CropCorner::BottomLeft) => {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeNeSw);
+                }
+                CropDragMode::Move => {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                }
+                CropDragMode::None => {
+                    if is_near_nw || is_near_se {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeNwSe);
+                    } else if is_near_ne || is_near_sw {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeNeSw);
+                    } else if is_inside {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                    }
+                }
+            }
+        }
+
+        // Draw tactile corner bracket handles with visual knob indicators
+        draw_crop_corner(
+            &painter,
+            nw,
+            Vec2::new(1.0, 1.0),
+            is_near_nw
+                || matches!(
+                    self.crop_drag_mode,
+                    CropDragMode::Corner(CropCorner::TopLeft)
+                ),
+        );
+        draw_crop_corner(
+            &painter,
+            ne,
+            Vec2::new(-1.0, 1.0),
+            is_near_ne
+                || matches!(
+                    self.crop_drag_mode,
+                    CropDragMode::Corner(CropCorner::TopRight)
+                ),
+        );
+        draw_crop_corner(
+            &painter,
+            sw,
+            Vec2::new(1.0, -1.0),
+            is_near_sw
+                || matches!(
+                    self.crop_drag_mode,
+                    CropDragMode::Corner(CropCorner::BottomLeft)
+                ),
+        );
+        draw_crop_corner(
+            &painter,
+            se,
+            Vec2::new(-1.0, -1.0),
+            is_near_se
+                || matches!(
+                    self.crop_drag_mode,
+                    CropDragMode::Corner(CropCorner::BottomRight)
+                ),
+        );
+
+        // Center crosshair for precise face alignment
+        let center = crop_rect.center();
+        let ch_len = 10.0;
+        let ch_stroke = Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 90));
         painter.line_segment(
-            [crop_rect.min, crop_rect.min + Vec2::new(corner_len, 0.0)],
-            corner_stroke,
+            [
+                center - Vec2::new(ch_len, 0.0),
+                center + Vec2::new(ch_len, 0.0),
+            ],
+            ch_stroke,
         );
         painter.line_segment(
-            [crop_rect.min, crop_rect.min + Vec2::new(0.0, corner_len)],
-            corner_stroke,
+            [
+                center - Vec2::new(0.0, ch_len),
+                center + Vec2::new(0.0, ch_len),
+            ],
+            ch_stroke,
         );
-        // Top-right
-        let tr = Pos2::new(crop_rect.max.x, crop_rect.min.y);
-        painter.line_segment([tr, tr - Vec2::new(corner_len, 0.0)], corner_stroke);
-        painter.line_segment([tr, tr + Vec2::new(0.0, corner_len)], corner_stroke);
-        // Bottom-left
-        let bl = Pos2::new(crop_rect.min.x, crop_rect.max.y);
-        painter.line_segment([bl, bl + Vec2::new(corner_len, 0.0)], corner_stroke);
-        painter.line_segment([bl, bl - Vec2::new(0.0, corner_len)], corner_stroke);
-        // Bottom-right
-        let br = crop_rect.max;
-        painter.line_segment([br, br - Vec2::new(corner_len, 0.0)], corner_stroke);
-        painter.line_segment([br, br - Vec2::new(0.0, corner_len)], corner_stroke);
 
         // Biometric passport alignment guides
         if self.show_biometric_guides {
@@ -1238,23 +1389,50 @@ impl ImprintApp {
             );
         }
 
-        // Interactive mouse dragging & wheel zoom handling
-        let mouse_pos = ui.input(|i| i.pointer.hover_pos());
-        if mouse_pos.is_some_and(|pos| work_rect.contains(pos)) {
-            // Scroll wheel zooms crop frame
-            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-            if scroll.abs() > 0.0 {
-                let zoom_factor = if scroll > 0.0 { 0.96 } else { 1.04 };
-                self.zoom_crop(zoom_factor);
-            }
+        // Real-time dimension badge above crop frame
+        let badge_text = format!(
+            "{} × {} mm",
+            self.grid_config.photo.width.0, self.grid_config.photo.height.0
+        );
+        let badge_pos = Pos2::new(crop_rect.center().x, crop_rect.min.y - 12.0);
+        if badge_pos.y >= work_rect.min.y + 12.0 {
+            painter.text(
+                badge_pos,
+                egui::Align2::CENTER_CENTER,
+                badge_text,
+                egui::FontId::proportional(11.0),
+                Color32::from_rgb(220, 225, 235),
+            );
         }
 
-        if response.dragged() && disp_w > 0.0 && disp_h > 0.0 {
-            let delta = response.drag_delta();
-            self.crop_area.x += delta.x / disp_w;
-            self.crop_area.y += delta.y / disp_h;
-            self.crop_area.clamp_within_bounds();
-            self.texture_needs_update = true;
+        // Smooth drag execution
+        if primary_down && self.crop_drag_mode != CropDragMode::None && disp_w > 0.0 && disp_h > 0.0
+        {
+            let delta = ui.input(|i| i.pointer.delta());
+            if delta.length_sq() > 0.0 {
+                let delta_norm_x = delta.x / disp_w;
+                let delta_norm_y = delta.y / disp_h;
+                let desired_norm_aspect = target_aspect / (src_w / src_h);
+
+                match self.crop_drag_mode {
+                    CropDragMode::Move => {
+                        self.crop_area.x += delta_norm_x;
+                        self.crop_area.y += delta_norm_y;
+                        self.crop_area.clamp_within_bounds();
+                    }
+                    CropDragMode::Corner(corner) => {
+                        self.crop_area.resize_from_corner(
+                            corner,
+                            delta_norm_x,
+                            delta_norm_y,
+                            desired_norm_aspect,
+                        );
+                    }
+                    CropDragMode::None => {}
+                }
+                self.texture_needs_update = true;
+            }
+            ui.ctx().request_repaint();
         }
     }
 
@@ -1533,6 +1711,24 @@ impl ImprintApp {
                 });
         }
     }
+}
+
+/// Draws an L-shaped corner bracket handle with high contrast shadow and highlight dot.
+fn draw_crop_corner(painter: &egui::Painter, pos: Pos2, dir: Vec2, is_hovered: bool) {
+    let len = 18.0;
+    let thickness = 4.0;
+    let color = if is_hovered {
+        Color32::from_rgb(255, 215, 0)
+    } else {
+        Color32::WHITE
+    };
+    let shadow = Stroke::new(thickness + 2.0, Color32::from_black_alpha(140));
+    painter.line_segment([pos, pos + Vec2::new(len * dir.x, 0.0)], shadow);
+    painter.line_segment([pos, pos + Vec2::new(0.0, len * dir.y)], shadow);
+    let stroke = Stroke::new(thickness, color);
+    painter.line_segment([pos, pos + Vec2::new(len * dir.x, 0.0)], stroke);
+    painter.line_segment([pos, pos + Vec2::new(0.0, len * dir.y)], stroke);
+    painter.circle_filled(pos, 3.5, color);
 }
 
 #[cfg(test)]

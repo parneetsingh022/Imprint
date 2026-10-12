@@ -161,6 +161,99 @@ impl CropArea {
 
         (px_x, px_y, px_w, px_h)
     }
+
+    /// Resizes the crop box from a specific corner while strictly locking to `desired_norm_aspect`.
+    pub fn resize_from_corner(
+        &mut self,
+        corner: CropCorner,
+        delta_x: f32,
+        delta_y: f32,
+        desired_norm_aspect: f32,
+    ) {
+        if desired_norm_aspect <= 0.0 || !desired_norm_aspect.is_finite() {
+            return;
+        }
+
+        let len = (desired_norm_aspect * desired_norm_aspect + 1.0).sqrt();
+        let dir_x = desired_norm_aspect / len;
+        let dir_y = 1.0 / len;
+
+        let (delta_proj, anchor_x, anchor_y, max_w, max_h) = match corner {
+            CropCorner::TopLeft => {
+                let ax = self.x + self.width;
+                let ay = self.y + self.height;
+                (-delta_x * dir_x - delta_y * dir_y, ax, ay, ax, ay)
+            }
+            CropCorner::TopRight => {
+                let ax = self.x;
+                let ay = self.y + self.height;
+                (delta_x * dir_x - delta_y * dir_y, ax, ay, 1.0 - ax, ay)
+            }
+            CropCorner::BottomLeft => {
+                let ax = self.x + self.width;
+                let ay = self.y;
+                (-delta_x * dir_x + delta_y * dir_y, ax, ay, ax, 1.0 - ay)
+            }
+            CropCorner::BottomRight => {
+                let ax = self.x;
+                let ay = self.y;
+                (
+                    delta_x * dir_x + delta_y * dir_y,
+                    ax,
+                    ay,
+                    1.0 - ax,
+                    1.0 - ay,
+                )
+            }
+        };
+
+        let delta_h = delta_proj * dir_y;
+        let mut new_h = (self.height + delta_h).clamp(0.05, 1.0);
+        let mut new_w = new_h * desired_norm_aspect;
+
+        if new_w > max_w {
+            new_w = max_w;
+            new_h = new_w / desired_norm_aspect;
+        }
+        if new_h > max_h {
+            new_h = max_h;
+            new_w = new_h * desired_norm_aspect;
+        }
+
+        let new_w = new_w.clamp(0.05, 1.0);
+        let new_h = new_h.clamp(0.05, 1.0);
+
+        match corner {
+            CropCorner::TopLeft => {
+                self.x = (anchor_x - new_w).max(0.0);
+                self.y = (anchor_y - new_h).max(0.0);
+            }
+            CropCorner::TopRight => {
+                self.x = anchor_x;
+                self.y = (anchor_y - new_h).max(0.0);
+            }
+            CropCorner::BottomLeft => {
+                self.x = (anchor_x - new_w).max(0.0);
+                self.y = anchor_y;
+            }
+            CropCorner::BottomRight => {
+                self.x = anchor_x;
+                self.y = anchor_y;
+            }
+        }
+        self.width = new_w;
+        self.height = new_h;
+        self.clamp_within_bounds();
+    }
+}
+
+/// Four interactive corners of the crop bounding box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CropCorner {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
 }
 
 /// Represents an imported original photograph.
@@ -330,5 +423,26 @@ mod tests {
         let center_y = crop.y + (crop.height / 2.0);
         assert!((center_x - 0.5).abs() < 1e-3);
         assert!((center_y - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_resize_from_corner_maintains_aspect() {
+        let mut crop = CropArea::new(0.2, 0.2, 0.4, 0.4);
+        let target_norm_aspect = 1.0;
+
+        // Resize from BottomRight
+        crop.resize_from_corner(CropCorner::BottomRight, 0.1, 0.1, target_norm_aspect);
+        assert!((crop.x - 0.2).abs() < 1e-4);
+        assert!((crop.y - 0.2).abs() < 1e-4);
+        assert!((crop.width / crop.height - 1.0).abs() < 1e-4);
+        assert!(crop.width > 0.4);
+
+        // Resize from TopLeft (opposite bottom-right corner should remain anchored)
+        let initial_bottom_right = (crop.x + crop.width, crop.y + crop.height);
+        crop.resize_from_corner(CropCorner::TopLeft, -0.05, -0.05, target_norm_aspect);
+        let new_bottom_right = (crop.x + crop.width, crop.y + crop.height);
+        assert!((initial_bottom_right.0 - new_bottom_right.0).abs() < 1e-4);
+        assert!((initial_bottom_right.1 - new_bottom_right.1).abs() < 1e-4);
+        assert!((crop.width / crop.height - 1.0).abs() < 1e-4);
     }
 }
