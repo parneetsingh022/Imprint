@@ -6,4 +6,7 @@ edition = "2024"
 [dependencies]
 eframe = "0.36.2"
 egui = "0.36.2"
+image = "0.25.10"
+printpdf = { version = "0.12.8", features = ["images", "jpeg", "png"] }
+rfd = "0.17.2"
 thiserror = "2.0"
