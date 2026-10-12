@@ -10,33 +10,65 @@ use crate::layout::{
     GridConfig, GuttersMm, LayoutGeometry, MarginsMm, calculate_max_fit, compute_layout,
 };
 use crate::preset::{PhotoPreset, SheetOrientation, SheetPreset};
+use crate::ui_icons::{ToolbarIcon, render_toolbar_button, render_toolbar_divider};
 use crate::units::{DimensionsMm, Dpi, Millimeters};
 
-/// Active tool mode selected in the tool sidebar.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Top-level workspace mode separating single photo editing from printable sheet layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WorkspaceMode {
+    #[default]
+    SheetLayout,
+    PhotoEdit,
+}
+
+impl WorkspaceMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            WorkspaceMode::PhotoEdit => "Photo Editor",
+            WorkspaceMode::SheetLayout => "Sheet Layout",
+        }
+    }
+}
+
+/// Active interactive tool in the current workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ToolMode {
-    SelectPan,
+    #[default]
+    Select,
+    Pan,
     Crop,
-    Grid,
-    Guides,
 }
 
 impl ToolMode {
     pub fn name(self) -> &'static str {
         match self {
-            ToolMode::SelectPan => "Pan / Select",
+            ToolMode::Select => "Select",
+            ToolMode::Pan => "Pan",
             ToolMode::Crop => "Crop Photo",
-            ToolMode::Grid => "Grid Layout",
-            ToolMode::Guides => "Guides & Marks",
         }
     }
 
-    pub fn icon(self) -> &'static str {
+    pub fn shortcut(self) -> &'static str {
         match self {
-            ToolMode::SelectPan => "✋",
-            ToolMode::Crop => "✂",
-            ToolMode::Grid => "▦",
-            ToolMode::Guides => "📏",
+            ToolMode::Select => "V",
+            ToolMode::Pan => "H",
+            ToolMode::Crop => "C",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            ToolMode::Select => "Select and inspect photo slots on printable sheet",
+            ToolMode::Pan => "Pan and navigate the workspace canvas",
+            ToolMode::Crop => "Crop photo with passport proportions and corner handles",
+        }
+    }
+
+    pub fn icon(self) -> ToolbarIcon {
+        match self {
+            ToolMode::Select => ToolbarIcon::Pointer,
+            ToolMode::Pan => ToolbarIcon::SelectPan,
+            ToolMode::Crop => ToolbarIcon::Crop,
         }
     }
 }
@@ -52,6 +84,9 @@ pub enum CropDragMode {
 
 /// The main Imprint application state.
 pub struct ImprintApp {
+    // Workspace mode
+    pub workspace: WorkspaceMode,
+
     // Presets & orientation
     pub photo_preset: PhotoPreset,
     pub sheet_preset: SheetPreset,
@@ -107,6 +142,7 @@ impl Default for ImprintApp {
         };
 
         Self {
+            workspace: WorkspaceMode::SheetLayout,
             photo_preset: PhotoPreset::UsPassport,
             sheet_preset: SheetPreset::Photo4x6,
             sheet_orientation: SheetOrientation::Portrait,
@@ -120,7 +156,7 @@ impl Default for ImprintApp {
             crop_drag_mode: CropDragMode::None,
             export_target: ExportTarget::FullSheet,
             export_format: ExportFormat::Pdf,
-            active_tool: ToolMode::SelectPan,
+            active_tool: ToolMode::Select,
             canvas_zoom: 1.0,
             canvas_pan: Vec2::ZERO,
             selected_slot: None,
@@ -137,6 +173,25 @@ impl Default for ImprintApp {
 impl ImprintApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         Self::default()
+    }
+
+    /// Switches workspace to Sheet Layout mode.
+    pub fn switch_to_sheet_layout(&mut self) {
+        if self.workspace != WorkspaceMode::SheetLayout {
+            self.workspace = WorkspaceMode::SheetLayout;
+            self.active_tool = ToolMode::Select;
+            self.texture_needs_update = true;
+            self.status_message = "Workspace: Sheet Layout".to_string();
+        }
+    }
+
+    /// Switches workspace to Photo Editor mode.
+    pub fn switch_to_photo_edit(&mut self) {
+        if self.workspace != WorkspaceMode::PhotoEdit {
+            self.workspace = WorkspaceMode::PhotoEdit;
+            self.active_tool = ToolMode::Crop;
+            self.status_message = "Workspace: Photo Editor".to_string();
+        }
     }
 
     /// Updates sheet dimensions according to current preset and orientation.
@@ -196,6 +251,7 @@ impl ImprintApp {
                 self.source_texture = None;
                 self.cropped_texture = None;
                 self.texture_needs_update = true;
+                self.workspace = WorkspaceMode::PhotoEdit;
                 self.active_tool = ToolMode::Crop;
             }
             Err(err) => {
@@ -344,10 +400,10 @@ impl ImprintApp {
                 Some(ctx.load_texture("source_photo", color_img, egui::TextureOptions::LINEAR));
         }
 
-        // PERFORMANCE: While in the crop tool, skip expensive CPU resampling!
+        // PERFORMANCE: While in the Photo Editor workspace, skip expensive CPU resampling!
         // The crop tool renders the source texture with real-time vector overlay guides.
         // We regenerate cropped_texture only when displaying the sheet layout.
-        if self.active_tool == ToolMode::Crop {
+        if self.workspace == WorkspaceMode::PhotoEdit {
             return;
         }
 
@@ -383,11 +439,87 @@ impl ImprintApp {
             self.load_image_from_path(path);
         }
     }
+
+    /// Handles Photoshop-style keyboard shortcuts when not typing into input fields.
+    fn handle_keyboard_shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.egui_wants_keyboard_input() {
+            return;
+        }
+
+        ctx.input(|i| {
+            let cmd_or_ctrl = i.modifiers.command || i.modifiers.ctrl;
+
+            if cmd_or_ctrl && i.key_pressed(egui::Key::O) {
+                self.import_image_dialog();
+            } else if cmd_or_ctrl && i.key_pressed(egui::Key::E) {
+                let target = match self.workspace {
+                    WorkspaceMode::SheetLayout => ExportTarget::FullSheet,
+                    WorkspaceMode::PhotoEdit => ExportTarget::SinglePhoto,
+                };
+                self.export_dialog(target);
+            } else if (cmd_or_ctrl && i.key_pressed(egui::Key::Num0))
+                || (!cmd_or_ctrl && i.key_pressed(egui::Key::Num0))
+            {
+                match self.workspace {
+                    WorkspaceMode::SheetLayout => self.auto_fit_grid(),
+                    WorkspaceMode::PhotoEdit => {
+                        if let Some(loaded) = &self.loaded_image {
+                            self.crop_area = CropArea::default_for_aspect(
+                                loaded.width,
+                                loaded.height,
+                                self.grid_config.photo.aspect_ratio(),
+                            );
+                            self.texture_needs_update = true;
+                        }
+                    }
+                }
+            } else if (cmd_or_ctrl && i.key_pressed(egui::Key::Num1))
+                || (!cmd_or_ctrl && i.key_pressed(egui::Key::Num1))
+            {
+                self.reset_view();
+            } else if i.key_pressed(egui::Key::Tab) {
+                match self.workspace {
+                    WorkspaceMode::SheetLayout => self.switch_to_photo_edit(),
+                    WorkspaceMode::PhotoEdit => self.switch_to_sheet_layout(),
+                }
+            } else if i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals) {
+                self.canvas_zoom = (self.canvas_zoom * 1.15).min(5.0);
+            } else if i.key_pressed(egui::Key::Minus) {
+                self.canvas_zoom = (self.canvas_zoom / 1.15).max(0.2);
+            } else if !cmd_or_ctrl && i.key_pressed(egui::Key::V) {
+                self.switch_to_sheet_layout();
+                self.active_tool = ToolMode::Select;
+                self.status_message = "Active tool: Select (Sheet Layout)".to_string();
+            } else if !cmd_or_ctrl && i.key_pressed(egui::Key::H) {
+                self.active_tool = ToolMode::Pan;
+                self.status_message = "Active tool: Pan".to_string();
+            } else if !cmd_or_ctrl && i.key_pressed(egui::Key::C) {
+                self.switch_to_photo_edit();
+                self.active_tool = ToolMode::Crop;
+                self.status_message = "Active tool: Crop (Photo Editor)".to_string();
+            } else if !cmd_or_ctrl && i.key_pressed(egui::Key::R) {
+                let any_on = self.show_cut_marks
+                    || self.show_margins
+                    || self.show_dimensions
+                    || self.show_biometric_guides;
+                self.show_cut_marks = !any_on;
+                self.show_margins = !any_on;
+                self.show_dimensions = !any_on;
+                self.show_biometric_guides = !any_on;
+                self.status_message = if !any_on {
+                    "Guides and marks enabled.".to_string()
+                } else {
+                    "Guides and marks disabled.".to_string()
+                };
+            }
+        });
+    }
 }
 
 impl eframe::App for ImprintApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.handle_dropped_files(ui.ctx());
+        self.handle_keyboard_shortcuts(ui.ctx());
         self.update_textures_if_needed(ui.ctx());
 
         self.render_menu_bar(ui);
@@ -469,500 +601,791 @@ impl ImprintApp {
         });
     }
 
-    /// Renders the left tool sidebar.
+    /// Renders the left tool sidebar with Photoshop-style icon-only buttons.
     fn render_tool_sidebar(&mut self, ui: &mut Ui) {
         Panel::left("tool_sidebar")
             .resizable(false)
-            .exact_size(70.0)
+            .exact_size(46.0)
             .show(ui, |ui| {
                 ui.vertical_centered(|ui| {
-                    ui.add_space(8.0);
-                    ui.heading("Tools");
-                    ui.add_space(8.0);
+                    ui.add_space(6.0);
 
-                    let tools = [
-                        ToolMode::SelectPan,
-                        ToolMode::Crop,
-                        ToolMode::Grid,
-                        ToolMode::Guides,
-                    ];
+                    // --- Permanent Professional Tool Palette ---
 
-                    for tool in tools {
-                        let selected = self.active_tool == tool;
-                        let text = format!("{}\n{}", tool.icon(), tool.name());
-                        if ui
-                            .selectable_label(selected, egui::RichText::new(text).size(11.0))
-                            .on_hover_text(tool.name())
-                            .clicked()
-                        {
-                            self.active_tool = tool;
-                            self.status_message = format!("Active tool: {}", tool.name());
-                        }
-                        ui.add_space(4.0);
+                    // 1. Selection Tool (V)
+                    let is_select = self.workspace == WorkspaceMode::SheetLayout
+                        && self.active_tool == ToolMode::Select;
+                    let sel_resp = render_toolbar_button(
+                        ui,
+                        ToolbarIcon::Pointer,
+                        is_select,
+                        "Select Tool",
+                        Some("V"),
+                        "Select and inspect photo slots on printable sheet",
+                    );
+                    if sel_resp.clicked() {
+                        self.switch_to_sheet_layout();
+                        self.active_tool = ToolMode::Select;
+                        self.status_message = "Active tool: Select Photo Slots".to_string();
+                    }
+                    ui.add_space(3.0);
+
+                    // 2. Crop Tool (C)
+                    let is_crop = self.workspace == WorkspaceMode::PhotoEdit
+                        && self.active_tool == ToolMode::Crop;
+                    let crop_resp = render_toolbar_button(
+                        ui,
+                        ToolbarIcon::Crop,
+                        is_crop,
+                        "Crop Tool",
+                        Some("C"),
+                        "Crop photo with locked passport proportions",
+                    );
+                    if crop_resp.clicked() {
+                        self.switch_to_photo_edit();
+                        self.active_tool = ToolMode::Crop;
+                        self.status_message = "Active tool: Crop Photo Framing".to_string();
+                    }
+                    ui.add_space(3.0);
+
+                    // 3. Pan / Hand Tool (H)
+                    let is_pan = self.active_tool == ToolMode::Pan;
+                    let pan_resp = render_toolbar_button(
+                        ui,
+                        ToolbarIcon::SelectPan,
+                        is_pan,
+                        "Pan Tool",
+                        Some("H"),
+                        "Pan and navigate the workspace canvas",
+                    );
+                    if pan_resp.clicked() {
+                        self.active_tool = ToolMode::Pan;
+                        self.status_message = "Active tool: Pan Canvas".to_string();
                     }
 
-                    ui.separator();
-                    ui.add_space(4.0);
+                    render_toolbar_divider(ui);
 
-                    // Import shortcut button
-                    if ui
-                        .button("📁\nImport")
-                        .on_hover_text("Import Image File")
-                        .clicked()
-                    {
+                    // --- File Actions (Always in fixed positions) ---
+                    let import_resp = render_toolbar_button(
+                        ui,
+                        ToolbarIcon::Import,
+                        false,
+                        "Import Photo",
+                        Some("⌘O / Ctrl+O"),
+                        "Open a portrait photograph (JPG, PNG, WebP) from disk.",
+                    );
+                    if import_resp.clicked() {
                         self.import_image_dialog();
                     }
+                    ui.add_space(3.0);
 
-                    ui.add_space(4.0);
-
-                    // Export shortcut button
-                    if ui
-                        .button("💾\nExport")
-                        .on_hover_text("Export to PDF / Image")
-                        .clicked()
-                    {
-                        self.export_dialog(self.export_target);
+                    let export_resp = render_toolbar_button(
+                        ui,
+                        ToolbarIcon::Export,
+                        false,
+                        "Export Output",
+                        Some("⌘E / Ctrl+E"),
+                        "Export print-ready PDF or high-resolution image.",
+                    );
+                    if export_resp.clicked() {
+                        let target = match self.workspace {
+                            WorkspaceMode::SheetLayout => ExportTarget::FullSheet,
+                            WorkspaceMode::PhotoEdit => ExportTarget::SinglePhoto,
+                        };
+                        self.export_dialog(target);
                     }
 
-                    ui.separator();
-                    ui.add_space(4.0);
+                    render_toolbar_divider(ui);
 
-                    // View navigation buttons
-                    if ui.button("🔍+").on_hover_text("Zoom In").clicked() {
+                    // --- View & Navigation Controls ---
+                    let zoom_in_resp = render_toolbar_button(
+                        ui,
+                        ToolbarIcon::ZoomIn,
+                        false,
+                        "Zoom In",
+                        Some("+"),
+                        "Zoom in on workspace canvas.",
+                    );
+                    if zoom_in_resp.clicked() {
                         self.canvas_zoom = (self.canvas_zoom * 1.15).min(5.0);
                     }
-                    if ui.button("🔍-").on_hover_text("Zoom Out").clicked() {
+                    ui.add_space(3.0);
+
+                    let zoom_out_resp = render_toolbar_button(
+                        ui,
+                        ToolbarIcon::ZoomOut,
+                        false,
+                        "Zoom Out",
+                        Some("-"),
+                        "Zoom out on workspace canvas.",
+                    );
+                    if zoom_out_resp.clicked() {
                         self.canvas_zoom = (self.canvas_zoom / 1.15).max(0.2);
                     }
-                    if ui.button("1:1").on_hover_text("Reset Zoom").clicked() {
+                    ui.add_space(3.0);
+
+                    let zoom_100_resp = render_toolbar_button(
+                        ui,
+                        ToolbarIcon::Zoom100,
+                        false,
+                        "Actual Size (100%)",
+                        Some("1"),
+                        "Reset zoom to 100% scale and center canvas.",
+                    );
+                    if zoom_100_resp.clicked() {
                         self.reset_view();
                     }
-                    if ui.button("⚡ Fit").on_hover_text("Auto Fit Grid").clicked() {
-                        self.auto_fit_grid();
+                    ui.add_space(3.0);
+
+                    let (fit_label, fit_desc) = match self.workspace {
+                        WorkspaceMode::SheetLayout => (
+                            "Fit Sheet to Viewport",
+                            "Auto-fit grid arrangement and optimize sheet photos.",
+                        ),
+                        WorkspaceMode::PhotoEdit => (
+                            "Maximize Crop Fit",
+                            "Maximize crop boundary with locked passport proportions.",
+                        ),
+                    };
+                    let fit_resp = render_toolbar_button(
+                        ui,
+                        ToolbarIcon::FitScreen,
+                        false,
+                        fit_label,
+                        Some("0"),
+                        fit_desc,
+                    );
+                    if fit_resp.clicked() {
+                        match self.workspace {
+                            WorkspaceMode::SheetLayout => self.auto_fit_grid(),
+                            WorkspaceMode::PhotoEdit => {
+                                if let Some(loaded) = &self.loaded_image {
+                                    self.crop_area = CropArea::default_for_aspect(
+                                        loaded.width,
+                                        loaded.height,
+                                        self.grid_config.photo.aspect_ratio(),
+                                    );
+                                    self.texture_needs_update = true;
+                                }
+                            }
+                        }
                     }
                 });
             });
     }
 
-    /// Renders the right properties panel.
+    /// Renders the right properties panel depending on the active workspace.
     fn render_properties_panel(&mut self, ui: &mut Ui) {
         Panel::right("properties_panel")
             .resizable(true)
-            .default_size(310.0)
+            .default_size(320.0)
             .min_size(270.0)
-            .max_size(460.0)
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.add_space(4.0);
-                    ui.heading("Properties & Settings");
-                    ui.add_space(8.0);
+            .max_size(480.0)
+            .show(ui, |ui| match self.workspace {
+                WorkspaceMode::SheetLayout => self.render_sheet_properties(ui),
+                WorkspaceMode::PhotoEdit => self.render_photo_properties(ui),
+            });
+    }
 
-                    // --- Active Photo & Crop ---
-                    ui.group(|ui| {
-                        ui.strong("📷 Active Photo & Crop");
-                        ui.add_space(4.0);
-
-                        if let Some(loaded) = &self.loaded_image {
-                            ui.label(format!("File: {}", loaded.file_name));
-                            ui.label(format!("Original: {} × {} px", loaded.width, loaded.height));
-                            let (px_w, px_h) = self.grid_config.photo.to_pixels(self.dpi);
-                            ui.label(format!(
-                                "Target Print: {} × {} px @ {}",
-                                px_w, px_h, self.dpi
-                            ));
-
-                            ui.horizontal(|ui| {
-                                let is_cropping = self.active_tool == ToolMode::Crop;
-                                if ui
-                                    .selectable_label(is_cropping, "✂ Adjust Crop")
-                                    .on_hover_text("Switch to interactive crop tool")
-                                    .clicked()
-                                {
-                                    self.active_tool = ToolMode::Crop;
-                                }
-
-                                if ui
-                                    .button("🔄 Replace...")
-                                    .on_hover_text("Select a different photo file")
-                                    .clicked()
-                                {
-                                    self.import_image_dialog();
-                                }
-
-                                if ui
-                                    .button("🗑")
-                                    .on_hover_text("Clear current photo")
-                                    .clicked()
-                                {
-                                    self.loaded_image = None;
-                                    self.source_texture = None;
-                                    self.cropped_texture = None;
-                                    self.status_message = "Photo removed.".to_string();
-                                }
-                            });
-                        } else {
-                            ui.colored_label(
-                                Color32::from_rgb(170, 175, 185),
-                                "No photo imported.",
-                            );
-                            if ui
-                                .button("📁 Import Portrait Photo...")
-                                .on_hover_text("Choose a JPG, PNG, or WebP photo")
-                                .clicked()
-                            {
-                                self.import_image_dialog();
-                            }
-                        }
-                    });
-
-                    ui.add_space(6.0);
-
-                    // --- Export Section ---
-                    ui.group(|ui| {
-                        ui.strong("🖨 Export Output");
-                        ui.add_space(4.0);
-
-                        egui::ComboBox::from_label("Target")
-                            .selected_text(self.export_target.label())
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut self.export_target,
-                                    ExportTarget::FullSheet,
-                                    ExportTarget::FullSheet.label(),
-                                );
-                                ui.selectable_value(
-                                    &mut self.export_target,
-                                    ExportTarget::SinglePhoto,
-                                    ExportTarget::SinglePhoto.label(),
-                                );
-                            });
-
-                        egui::ComboBox::from_id_salt("export_format_combo")
-                            .selected_text(self.export_format.label())
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut self.export_format,
-                                    ExportFormat::Pdf,
-                                    ExportFormat::Pdf.label(),
-                                );
-                                ui.selectable_value(
-                                    &mut self.export_format,
-                                    ExportFormat::Png,
-                                    ExportFormat::Png.label(),
-                                );
-                                ui.selectable_value(
-                                    &mut self.export_format,
-                                    ExportFormat::Jpeg,
-                                    ExportFormat::Jpeg.label(),
-                                );
-                            });
-
-                        let (out_w, out_h) = match self.export_target {
-                            ExportTarget::FullSheet => self.grid_config.sheet.to_pixels(self.dpi),
-                            ExportTarget::SinglePhoto => self.grid_config.photo.to_pixels(self.dpi),
-                        };
-                        ui.label(format!("Resolution: {} × {} px", out_w, out_h));
-
-                        let has_photo = self.loaded_image.is_some();
-                        let btn =
-                            egui::Button::new(egui::RichText::new("💾 Export to File...").strong());
-                        if ui.add_enabled(has_photo, btn).clicked() {
-                            self.export_dialog(self.export_target);
-                        }
-
-                        if !has_photo {
-                            ui.colored_label(
-                                Color32::from_rgb(200, 160, 50),
-                                "Import a photo to enable export",
-                            );
-                        }
-                    });
-
-                    ui.add_space(6.0);
-
-                    // --- Sheet Setup ---
-                    ui.group(|ui| {
-                        ui.strong("📄 Sheet Setup");
-                        ui.add_space(4.0);
-
-                        let old_preset = self.sheet_preset;
-                        egui::ComboBox::from_label("Sheet Preset")
-                            .selected_text(self.sheet_preset.short_name())
-                            .show_ui(ui, |ui| {
-                                for preset in SheetPreset::ALL {
-                                    ui.selectable_value(
-                                        &mut self.sheet_preset,
-                                        *preset,
-                                        preset.label(),
-                                    );
-                                }
-                            });
-                        if self.sheet_preset != old_preset {
-                            self.apply_sheet_preset();
-                        }
-
-                        ui.horizontal(|ui| {
-                            ui.label("Orientation:");
-                            let p_selected = self.sheet_orientation == SheetOrientation::Portrait;
-                            if ui.selectable_label(p_selected, "Portrait").clicked() && !p_selected
-                            {
-                                self.sheet_orientation = SheetOrientation::Portrait;
-                                self.apply_sheet_preset();
-                            }
-                            let l_selected = self.sheet_orientation == SheetOrientation::Landscape;
-                            if ui.selectable_label(l_selected, "Landscape").clicked() && !l_selected
-                            {
-                                self.sheet_orientation = SheetOrientation::Landscape;
-                                self.apply_sheet_preset();
-                            }
-                        });
-
-                        ui.horizontal(|ui| {
-                            ui.label("Width (mm):");
-                            let mut w = self.grid_config.sheet.width.0;
-                            if ui
-                                .add(egui::DragValue::new(&mut w).speed(0.5).range(10.0..=1000.0))
-                                .changed()
-                            {
-                                self.grid_config.sheet.width = Millimeters(w);
-                                self.sheet_preset = SheetPreset::Custom;
-                            }
-                        });
-
-                        ui.horizontal(|ui| {
-                            ui.label("Height (mm):");
-                            let mut h = self.grid_config.sheet.height.0;
-                            if ui
-                                .add(egui::DragValue::new(&mut h).speed(0.5).range(10.0..=1000.0))
-                                .changed()
-                            {
-                                self.grid_config.sheet.height = Millimeters(h);
-                                self.sheet_preset = SheetPreset::Custom;
-                            }
-                        });
-                    });
-
-                    ui.add_space(6.0);
-
-                    // --- Photo Dimensions ---
-                    ui.group(|ui| {
-                        ui.strong("📷 Photo Dimensions");
-                        ui.add_space(4.0);
-
-                        let old_photo_preset = self.photo_preset;
-                        egui::ComboBox::from_label("Passport Preset")
-                            .selected_text(self.photo_preset.short_name())
-                            .show_ui(ui, |ui| {
-                                for preset in PhotoPreset::ALL {
-                                    ui.selectable_value(
-                                        &mut self.photo_preset,
-                                        *preset,
-                                        preset.label(),
-                                    );
-                                }
-                            });
-                        if self.photo_preset != old_photo_preset {
-                            self.apply_photo_preset();
-                        }
-
-                        ui.horizontal(|ui| {
-                            ui.label("Width (mm):");
-                            let mut w = self.grid_config.photo.width.0;
-                            if ui
-                                .add(egui::DragValue::new(&mut w).speed(0.5).range(5.0..=500.0))
-                                .changed()
-                            {
-                                self.grid_config.photo.width = Millimeters(w);
-                                self.photo_preset = PhotoPreset::Custom;
-                                if let Some(loaded) = &self.loaded_image {
-                                    self.crop_area.adjust_aspect(
-                                        loaded.width,
-                                        loaded.height,
-                                        self.grid_config.photo.aspect_ratio(),
-                                    );
-                                    self.texture_needs_update = true;
-                                }
-                            }
-                        });
-
-                        ui.horizontal(|ui| {
-                            ui.label("Height (mm):");
-                            let mut h = self.grid_config.photo.height.0;
-                            if ui
-                                .add(egui::DragValue::new(&mut h).speed(0.5).range(5.0..=500.0))
-                                .changed()
-                            {
-                                self.grid_config.photo.height = Millimeters(h);
-                                self.photo_preset = PhotoPreset::Custom;
-                                if let Some(loaded) = &self.loaded_image {
-                                    self.crop_area.adjust_aspect(
-                                        loaded.width,
-                                        loaded.height,
-                                        self.grid_config.photo.aspect_ratio(),
-                                    );
-                                    self.texture_needs_update = true;
-                                }
-                            }
-                        });
-
-                        let aspect = self.grid_config.photo.aspect_ratio();
-                        ui.label(format!("Aspect Ratio: {:.2} : 1", aspect));
-
-                        ui.horizontal(|ui| {
-                            ui.label("Print DPI:");
-                            let old_dpi = self.dpi;
-                            egui::ComboBox::from_id_salt("dpi_combobox")
-                                .selected_text(format!("{}", self.dpi))
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(
-                                        &mut self.dpi,
-                                        Dpi::DRAFT,
-                                        "150 DPI (Draft)",
-                                    );
-                                    ui.selectable_value(
-                                        &mut self.dpi,
-                                        Dpi::STANDARD,
-                                        "300 DPI (Standard Print)",
-                                    );
-                                    ui.selectable_value(
-                                        &mut self.dpi,
-                                        Dpi::HIGH,
-                                        "600 DPI (High Resolution)",
-                                    );
-                                });
-                            if self.dpi != old_dpi {
-                                self.texture_needs_update = true;
-                            }
-                        });
-
-                        let (px_w, px_h) = self.grid_config.photo.to_pixels(self.dpi);
-                        ui.label(format!("Photo Pixels: {} × {}", px_w, px_h));
-                    });
-
-                    ui.add_space(6.0);
-
-                    // --- Grid Layout ---
-                    ui.group(|ui| {
-                        ui.strong("▦ Grid Arrangement");
-                        ui.add_space(4.0);
-
-                        ui.horizontal(|ui| {
-                            ui.label("Columns:");
-                            ui.add(egui::DragValue::new(&mut self.grid_config.cols).range(1..=20));
-                            ui.label("Rows:");
-                            ui.add(egui::DragValue::new(&mut self.grid_config.rows).range(1..=20));
-                        });
-
-                        ui.horizontal(|ui| {
-                            if ui.button("⚡ Max Fit").clicked() {
-                                self.auto_fit_grid();
-                            }
-                            ui.checkbox(&mut self.grid_config.auto_center, "Auto Center");
-                        });
-                    });
-
-                    ui.add_space(6.0);
-
-                    // --- Margins & Spacing ---
-                    ui.group(|ui| {
-                        ui.strong("📐 Margins & Spacing (mm)");
-                        ui.add_space(4.0);
-
-                        ui.horizontal(|ui| {
-                            ui.label("Left:");
-                            let mut m = self.grid_config.margins.left.0;
-                            if ui
-                                .add(egui::DragValue::new(&mut m).speed(0.5).range(0.0..=100.0))
-                                .changed()
-                            {
-                                self.grid_config.margins.left = Millimeters(m);
-                            }
-                            ui.label("Right:");
-                            let mut m = self.grid_config.margins.right.0;
-                            if ui
-                                .add(egui::DragValue::new(&mut m).speed(0.5).range(0.0..=100.0))
-                                .changed()
-                            {
-                                self.grid_config.margins.right = Millimeters(m);
-                            }
-                        });
-
-                        ui.horizontal(|ui| {
-                            ui.label("Top:");
-                            let mut m = self.grid_config.margins.top.0;
-                            if ui
-                                .add(egui::DragValue::new(&mut m).speed(0.5).range(0.0..=100.0))
-                                .changed()
-                            {
-                                self.grid_config.margins.top = Millimeters(m);
-                            }
-                            ui.label("Bottom:");
-                            let mut m = self.grid_config.margins.bottom.0;
-                            if ui
-                                .add(egui::DragValue::new(&mut m).speed(0.5).range(0.0..=100.0))
-                                .changed()
-                            {
-                                self.grid_config.margins.bottom = Millimeters(m);
-                            }
-                        });
-
-                        ui.separator();
-                        ui.label("Gutters (Spacing between photos):");
-                        ui.horizontal(|ui| {
-                            ui.label("Horizontal:");
-                            let mut g = self.grid_config.gutters.horizontal.0;
-                            if ui
-                                .add(egui::DragValue::new(&mut g).speed(0.5).range(0.0..=50.0))
-                                .changed()
-                            {
-                                self.grid_config.gutters.horizontal = Millimeters(g);
-                            }
-                            ui.label("Vertical:");
-                            let mut g = self.grid_config.gutters.vertical.0;
-                            if ui
-                                .add(egui::DragValue::new(&mut g).speed(0.5).range(0.0..=50.0))
-                                .changed()
-                            {
-                                self.grid_config.gutters.vertical = Millimeters(g);
-                            }
-                        });
-                    });
-
-                    ui.add_space(6.0);
-
-                    // --- Layout Verification ---
-                    ui.group(|ui| {
-                        ui.strong("🔍 Layout Verification");
-                        ui.add_space(4.0);
-
-                        match compute_layout(&self.grid_config) {
-                            Ok(layout) => {
-                                ui.colored_label(
-                                    Color32::from_rgb(46, 160, 67),
-                                    format!(
-                                        "✓ Print Ready: {} photos fit on sheet",
-                                        layout.count()
-                                    ),
-                                );
-                                ui.label(format!(
-                                    "Grid Bounds: {} × {}",
-                                    layout.grid_width, layout.grid_height
-                                ));
-                                ui.label(format!(
-                                    "Printable Area: {} × {}",
-                                    layout.printable_width, layout.printable_height
-                                ));
-                            }
-                            Err(err) => {
-                                ui.colored_label(
-                                    Color32::from_rgb(230, 80, 70),
-                                    format!("⚠ Layout Error:\n{err}"),
-                                );
-                            }
-                        }
-                    });
+    /// Properties inspector for Printable Sheet Layout workspace.
+    fn render_sheet_properties(&mut self, ui: &mut Ui) {
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.heading("Sheet & Grid Properties");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .button("✂ Edit Photo")
+                        .on_hover_text("Open Photo Editor to frame and crop photo")
+                        .clicked()
+                    {
+                        self.switch_to_photo_edit();
+                    }
                 });
             });
+            ui.add_space(8.0);
+
+            // --- Active Photo Card ---
+            ui.group(|ui| {
+                ui.strong("Placed Photograph");
+                ui.add_space(4.0);
+                if let Some(loaded) = &self.loaded_image {
+                    ui.label(format!("File: {}", loaded.file_name));
+                    let (px_w, px_h) = self.grid_config.photo.to_pixels(self.dpi);
+                    ui.label(format!(
+                        "Photo: {} × {} mm ({} × {} px)",
+                        self.grid_config.photo.width.0, self.grid_config.photo.height.0, px_w, px_h
+                    ));
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button("✂ Adjust Crop...")
+                            .on_hover_text("Open Photo Editor to adjust crop and framing")
+                            .clicked()
+                        {
+                            self.switch_to_photo_edit();
+                        }
+                        if ui
+                            .button("Replace...")
+                            .on_hover_text("Choose a different photo file")
+                            .clicked()
+                        {
+                            self.import_image_dialog();
+                        }
+                    });
+                } else {
+                    ui.colored_label(
+                        Color32::from_rgb(170, 175, 185),
+                        "No photo placed on sheet.",
+                    );
+                    if ui.button("Import Photo...").clicked() {
+                        self.import_image_dialog();
+                    }
+                }
+            });
+
+            ui.add_space(6.0);
+
+            // --- Printable Sheet Setup ---
+            ui.group(|ui| {
+                ui.strong("Printable Sheet Setup");
+                ui.add_space(4.0);
+                let old_preset = self.sheet_preset;
+                egui::ComboBox::from_label("Sheet Preset")
+                    .selected_text(self.sheet_preset.short_name())
+                    .show_ui(ui, |ui| {
+                        for preset in SheetPreset::ALL {
+                            ui.selectable_value(&mut self.sheet_preset, *preset, preset.label());
+                        }
+                    });
+                if self.sheet_preset != old_preset {
+                    self.apply_sheet_preset();
+                }
+
+                ui.horizontal(|ui| {
+                    ui.label("Orientation:");
+                    let p_selected = self.sheet_orientation == SheetOrientation::Portrait;
+                    if ui.selectable_label(p_selected, "Portrait").clicked() && !p_selected {
+                        self.sheet_orientation = SheetOrientation::Portrait;
+                        self.apply_sheet_preset();
+                    }
+                    let l_selected = self.sheet_orientation == SheetOrientation::Landscape;
+                    if ui.selectable_label(l_selected, "Landscape").clicked() && !l_selected {
+                        self.sheet_orientation = SheetOrientation::Landscape;
+                        self.apply_sheet_preset();
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Width (mm):");
+                    let mut w = self.grid_config.sheet.width.0;
+                    if ui
+                        .add(egui::DragValue::new(&mut w).speed(0.5).range(10.0..=1000.0))
+                        .changed()
+                    {
+                        self.grid_config.sheet.width = Millimeters(w);
+                        self.sheet_preset = SheetPreset::Custom;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Height (mm):");
+                    let mut h = self.grid_config.sheet.height.0;
+                    if ui
+                        .add(egui::DragValue::new(&mut h).speed(0.5).range(10.0..=1000.0))
+                        .changed()
+                    {
+                        self.grid_config.sheet.height = Millimeters(h);
+                        self.sheet_preset = SheetPreset::Custom;
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Print DPI:");
+                    let old_dpi = self.dpi;
+                    egui::ComboBox::from_id_salt("sheet_dpi_combobox")
+                        .selected_text(format!("{}", self.dpi))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.dpi, Dpi::DRAFT, "150 DPI (Draft)");
+                            ui.selectable_value(
+                                &mut self.dpi,
+                                Dpi::STANDARD,
+                                "300 DPI (Standard Print)",
+                            );
+                            ui.selectable_value(
+                                &mut self.dpi,
+                                Dpi::HIGH,
+                                "600 DPI (High Resolution)",
+                            );
+                        });
+                    if self.dpi != old_dpi {
+                        self.texture_needs_update = true;
+                    }
+                });
+                let (sheet_px_w, sheet_px_h) = self.grid_config.sheet.to_pixels(self.dpi);
+                ui.label(format!(
+                    "Sheet Pixels: {} × {} px @ {}",
+                    sheet_px_w, sheet_px_h, self.dpi
+                ));
+            });
+
+            ui.add_space(6.0);
+
+            // --- Grid Arrangement ---
+            ui.group(|ui| {
+                ui.strong("Grid Arrangement");
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label("Columns:");
+                    ui.add(egui::DragValue::new(&mut self.grid_config.cols).range(1..=20));
+                    ui.label("Rows:");
+                    ui.add(egui::DragValue::new(&mut self.grid_config.rows).range(1..=20));
+                });
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("Auto-Fit (Max Photos)")
+                        .on_hover_text("Calculate maximum photos fitting within sheet margins")
+                        .clicked()
+                    {
+                        self.auto_fit_grid();
+                    }
+                    ui.checkbox(&mut self.grid_config.auto_center, "Auto Center");
+                });
+            });
+
+            ui.add_space(6.0);
+
+            // --- Margins & Gutters ---
+            ui.group(|ui| {
+                ui.strong("Margins & Spacing (mm)");
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label("Left:");
+                    let mut m = self.grid_config.margins.left.0;
+                    if ui
+                        .add(egui::DragValue::new(&mut m).speed(0.5).range(0.0..=100.0))
+                        .changed()
+                    {
+                        self.grid_config.margins.left = Millimeters(m);
+                    }
+                    ui.label("Right:");
+                    let mut m = self.grid_config.margins.right.0;
+                    if ui
+                        .add(egui::DragValue::new(&mut m).speed(0.5).range(0.0..=100.0))
+                        .changed()
+                    {
+                        self.grid_config.margins.right = Millimeters(m);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Top:");
+                    let mut m = self.grid_config.margins.top.0;
+                    if ui
+                        .add(egui::DragValue::new(&mut m).speed(0.5).range(0.0..=100.0))
+                        .changed()
+                    {
+                        self.grid_config.margins.top = Millimeters(m);
+                    }
+                    ui.label("Bottom:");
+                    let mut m = self.grid_config.margins.bottom.0;
+                    if ui
+                        .add(egui::DragValue::new(&mut m).speed(0.5).range(0.0..=100.0))
+                        .changed()
+                    {
+                        self.grid_config.margins.bottom = Millimeters(m);
+                    }
+                });
+                ui.separator();
+                ui.label("Gutters (Spacing between photos):");
+                ui.horizontal(|ui| {
+                    ui.label("Horizontal:");
+                    let mut g = self.grid_config.gutters.horizontal.0;
+                    if ui
+                        .add(egui::DragValue::new(&mut g).speed(0.5).range(0.0..=50.0))
+                        .changed()
+                    {
+                        self.grid_config.gutters.horizontal = Millimeters(g);
+                    }
+                    ui.label("Vertical:");
+                    let mut g = self.grid_config.gutters.vertical.0;
+                    if ui
+                        .add(egui::DragValue::new(&mut g).speed(0.5).range(0.0..=50.0))
+                        .changed()
+                    {
+                        self.grid_config.gutters.vertical = Millimeters(g);
+                    }
+                });
+            });
+
+            ui.add_space(6.0);
+
+            // --- View & Print Guides ---
+            ui.group(|ui| {
+                ui.strong("View & Print Guides");
+                ui.add_space(4.0);
+                ui.checkbox(
+                    &mut self.show_cut_marks,
+                    "Corner Cut Marks (Scissors / Guillotine)",
+                );
+                ui.checkbox(&mut self.show_margins, "Sheet Printable Margins");
+                ui.checkbox(&mut self.show_dimensions, "Sheet Dimensions Annotation");
+                ui.checkbox(
+                    &mut self.show_biometric_guides,
+                    "Biometric Face Guides on Slots",
+                );
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Enable All").clicked() {
+                        self.show_cut_marks = true;
+                        self.show_margins = true;
+                        self.show_dimensions = true;
+                        self.show_biometric_guides = true;
+                    }
+                    if ui.button("Disable All").clicked() {
+                        self.show_cut_marks = false;
+                        self.show_margins = false;
+                        self.show_dimensions = false;
+                        self.show_biometric_guides = false;
+                    }
+                });
+            });
+
+            ui.add_space(6.0);
+
+            // --- Layout Verification ---
+            ui.group(|ui| {
+                ui.strong("Layout Verification");
+                ui.add_space(4.0);
+                match compute_layout(&self.grid_config) {
+                    Ok(layout) => {
+                        ui.colored_label(
+                            Color32::from_rgb(46, 160, 67),
+                            format!("✓ Print Ready: {} photos fit on sheet", layout.count()),
+                        );
+                        ui.label(format!(
+                            "Grid Bounds: {} × {}",
+                            layout.grid_width, layout.grid_height
+                        ));
+                        ui.label(format!(
+                            "Printable Area: {} × {}",
+                            layout.printable_width, layout.printable_height
+                        ));
+                    }
+                    Err(err) => {
+                        ui.colored_label(
+                            Color32::from_rgb(230, 80, 70),
+                            format!("⚠ Layout Error:\n{err}"),
+                        );
+                    }
+                }
+            });
+
+            ui.add_space(6.0);
+
+            // --- Export Full Sheet ---
+            ui.group(|ui| {
+                ui.strong("Export Full Sheet");
+                ui.add_space(4.0);
+                egui::ComboBox::from_id_salt("sheet_export_format")
+                    .selected_text(self.export_format.label())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.export_format,
+                            ExportFormat::Pdf,
+                            ExportFormat::Pdf.label(),
+                        );
+                        ui.selectable_value(
+                            &mut self.export_format,
+                            ExportFormat::Png,
+                            ExportFormat::Png.label(),
+                        );
+                        ui.selectable_value(
+                            &mut self.export_format,
+                            ExportFormat::Jpeg,
+                            ExportFormat::Jpeg.label(),
+                        );
+                    });
+                let (out_w, out_h) = self.grid_config.sheet.to_pixels(self.dpi);
+                ui.label(format!(
+                    "Resolution: {} × {} px @ {}",
+                    out_w, out_h, self.dpi
+                ));
+                let has_photo = self.loaded_image.is_some();
+                let btn =
+                    egui::Button::new(egui::RichText::new("Export Sheet to File...").strong());
+                if ui.add_enabled(has_photo, btn).clicked() {
+                    self.export_dialog(ExportTarget::FullSheet);
+                }
+                if !has_photo {
+                    ui.colored_label(
+                        Color32::from_rgb(200, 160, 50),
+                        "Import a photo to enable export",
+                    );
+                }
+            });
+        });
+    }
+
+    /// Properties inspector for Single Photo Editor workspace.
+    fn render_photo_properties(&mut self, ui: &mut Ui) {
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.heading("Photo & Crop Properties");
+            ui.add_space(8.0);
+
+            // --- Source Photo Details ---
+            ui.group(|ui| {
+                ui.strong("Source Photograph");
+                ui.add_space(4.0);
+                if let Some(loaded) = &self.loaded_image {
+                    ui.label(format!("File: {}", loaded.file_name));
+                    ui.label(format!("Original: {} × {} px", loaded.width, loaded.height));
+                    let (px_w, px_h) = self.grid_config.photo.to_pixels(self.dpi);
+                    ui.label(format!(
+                        "Target Print: {} × {} px @ {}",
+                        px_w, px_h, self.dpi
+                    ));
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button("Replace Photo...")
+                            .on_hover_text("Open another photo file")
+                            .clicked()
+                        {
+                            self.import_image_dialog();
+                        }
+                        if ui
+                            .button("Remove Photo")
+                            .on_hover_text("Remove photo")
+                            .clicked()
+                        {
+                            self.loaded_image = None;
+                            self.source_texture = None;
+                            self.cropped_texture = None;
+                            self.status_message = "Photo removed.".to_string();
+                        }
+                    });
+                } else {
+                    ui.colored_label(Color32::from_rgb(170, 175, 185), "No photo loaded.");
+                    if ui.button("Import Portrait Photo...").clicked() {
+                        self.import_image_dialog();
+                    }
+                }
+            });
+
+            ui.add_space(6.0);
+
+            // --- Passport & ID Photo Size Preset ---
+            ui.group(|ui| {
+                ui.strong("Passport & ID Size");
+                ui.add_space(4.0);
+
+                let old_photo_preset = self.photo_preset;
+                egui::ComboBox::from_label("Photo Preset")
+                    .selected_text(self.photo_preset.short_name())
+                    .show_ui(ui, |ui| {
+                        for preset in PhotoPreset::ALL {
+                            ui.selectable_value(&mut self.photo_preset, *preset, preset.label());
+                        }
+                    });
+                if self.photo_preset != old_photo_preset {
+                    self.apply_photo_preset();
+                }
+
+                ui.horizontal(|ui| {
+                    ui.label("Width (mm):");
+                    let mut w = self.grid_config.photo.width.0;
+                    if ui
+                        .add(egui::DragValue::new(&mut w).speed(0.5).range(5.0..=500.0))
+                        .changed()
+                    {
+                        self.grid_config.photo.width = Millimeters(w);
+                        self.photo_preset = PhotoPreset::Custom;
+                        if let Some(loaded) = &self.loaded_image {
+                            self.crop_area.adjust_aspect(
+                                loaded.width,
+                                loaded.height,
+                                self.grid_config.photo.aspect_ratio(),
+                            );
+                            self.texture_needs_update = true;
+                        }
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Height (mm):");
+                    let mut h = self.grid_config.photo.height.0;
+                    if ui
+                        .add(egui::DragValue::new(&mut h).speed(0.5).range(5.0..=500.0))
+                        .changed()
+                    {
+                        self.grid_config.photo.height = Millimeters(h);
+                        self.photo_preset = PhotoPreset::Custom;
+                        if let Some(loaded) = &self.loaded_image {
+                            self.crop_area.adjust_aspect(
+                                loaded.width,
+                                loaded.height,
+                                self.grid_config.photo.aspect_ratio(),
+                            );
+                            self.texture_needs_update = true;
+                        }
+                    }
+                });
+
+                let aspect = self.grid_config.photo.aspect_ratio();
+                ui.label(format!("Aspect Ratio: {:.2} : 1", aspect));
+
+                ui.horizontal(|ui| {
+                    ui.label("Print DPI:");
+                    let old_dpi = self.dpi;
+                    egui::ComboBox::from_id_salt("photo_dpi_combobox")
+                        .selected_text(format!("{}", self.dpi))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.dpi, Dpi::DRAFT, "150 DPI (Draft)");
+                            ui.selectable_value(
+                                &mut self.dpi,
+                                Dpi::STANDARD,
+                                "300 DPI (Standard Print)",
+                            );
+                            ui.selectable_value(
+                                &mut self.dpi,
+                                Dpi::HIGH,
+                                "600 DPI (High Resolution)",
+                            );
+                        });
+                    if self.dpi != old_dpi {
+                        self.texture_needs_update = true;
+                    }
+                });
+            });
+
+            ui.add_space(6.0);
+
+            // --- Crop Framing Controls ---
+            ui.group(|ui| {
+                ui.strong("Crop Framing");
+                ui.add_space(4.0);
+
+                if let Some(loaded) = &self.loaded_image {
+                    let (w, h) = (loaded.width, loaded.height);
+                    let target_aspect = self.grid_config.photo.aspect_ratio();
+
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button("Maximize Fit")
+                            .on_hover_text("Maximize crop area maintaining passport aspect ratio")
+                            .clicked()
+                        {
+                            self.crop_area = CropArea::default_for_aspect(w, h, target_aspect);
+                            self.texture_needs_update = true;
+                        }
+                        if ui
+                            .button("Center Box")
+                            .on_hover_text("Center current crop box on image")
+                            .clicked()
+                        {
+                            let center_x = (1.0 - self.crop_area.width) / 2.0;
+                            let center_y = (1.0 - self.crop_area.height) / 2.0;
+                            self.crop_area.x = center_x.clamp(0.0, 1.0);
+                            self.crop_area.y = center_y.clamp(0.0, 1.0);
+                            self.crop_area.clamp_within_bounds();
+                            self.texture_needs_update = true;
+                        }
+                    });
+
+                    ui.horizontal(|ui| {
+                        if ui.button("Zoom In Crop").clicked() {
+                            self.zoom_crop(0.92);
+                        }
+                        if ui.button("Zoom Out Crop").clicked() {
+                            self.zoom_crop(1.08);
+                        }
+                    });
+
+                    let crop_px_x = (self.crop_area.x * w as f32).round() as u32;
+                    let crop_px_y = (self.crop_area.y * h as f32).round() as u32;
+                    let crop_px_w = (self.crop_area.width * w as f32).round() as u32;
+                    let crop_px_h = (self.crop_area.height * h as f32).round() as u32;
+                    ui.label(format!(
+                        "Crop Rect: {} × {} px (at {}, {})",
+                        crop_px_w, crop_px_h, crop_px_x, crop_px_y
+                    ));
+                } else {
+                    ui.label("Import an image to frame crop.");
+                }
+            });
+
+            ui.add_space(6.0);
+
+            // --- Biometric Guides ---
+            ui.group(|ui| {
+                ui.strong("Biometric Face Guidelines");
+                ui.add_space(4.0);
+                ui.checkbox(&mut self.show_biometric_guides, "Show Biometric Guides");
+                ui.label("Official passport standards require:");
+                ui.colored_label(
+                    Color32::from_rgb(100, 200, 255),
+                    "• Crown line: top of hair/head (~12%)",
+                );
+                ui.colored_label(
+                    Color32::from_rgb(255, 215, 0),
+                    "• Eye line: eye level (56-69% from bottom)",
+                );
+                ui.colored_label(
+                    Color32::from_rgb(100, 200, 255),
+                    "• Chin line: base of chin (~25% from bottom)",
+                );
+                ui.colored_label(
+                    Color32::from_rgb(100, 200, 255),
+                    "• Vertical axis: head symmetry",
+                );
+            });
+
+            ui.add_space(6.0);
+
+            // --- Export Single Photo ---
+            ui.group(|ui| {
+                ui.strong("Export Single Photo");
+                ui.add_space(4.0);
+                egui::ComboBox::from_id_salt("photo_export_format")
+                    .selected_text(self.export_format.label())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.export_format,
+                            ExportFormat::Pdf,
+                            ExportFormat::Pdf.label(),
+                        );
+                        ui.selectable_value(
+                            &mut self.export_format,
+                            ExportFormat::Png,
+                            ExportFormat::Png.label(),
+                        );
+                        ui.selectable_value(
+                            &mut self.export_format,
+                            ExportFormat::Jpeg,
+                            ExportFormat::Jpeg.label(),
+                        );
+                    });
+                let (px_w, px_h) = self.grid_config.photo.to_pixels(self.dpi);
+                ui.label(format!("Resolution: {} × {} px @ {}", px_w, px_h, self.dpi));
+                let has_photo = self.loaded_image.is_some();
+                let btn = egui::Button::new(egui::RichText::new("Export Single Photo...").strong());
+                if ui.add_enabled(has_photo, btn).clicked() {
+                    self.export_dialog(ExportTarget::SinglePhoto);
+                }
+                if !has_photo {
+                    ui.colored_label(
+                        Color32::from_rgb(200, 160, 50),
+                        "Import a photo to enable export",
+                    );
+                }
+            });
+
+            ui.add_space(10.0);
+            if ui
+                .button(egui::RichText::new("Return to Sheet Layout ➔").strong())
+                .on_hover_text("Return to printable sheet grid")
+                .clicked()
+            {
+                self.switch_to_sheet_layout();
+            }
+        });
     }
 
     /// Renders the bottom status bar.
@@ -1007,10 +1430,167 @@ impl ImprintApp {
     /// Renders the central canvas: either interactive Crop Editor or Printable Sheet.
     fn render_central_canvas(&mut self, ui: &mut Ui) {
         egui::CentralPanel::default().show(ui, |ui| {
-            if self.active_tool == ToolMode::Crop {
-                self.render_crop_editor(ui);
-            } else {
-                self.render_sheet_canvas(ui);
+            // Workspace navigation header tabs
+            let bar_h = 36.0;
+            let available_width = ui.available_width();
+            let (top_rect, _) =
+                ui.allocate_exact_size(Vec2::new(available_width, bar_h), egui::Sense::hover());
+            let painter = ui.painter_at(top_rect);
+            painter.rect_filled(top_rect, 0.0, Color32::from_rgb(25, 27, 34));
+            painter.line_segment(
+                [top_rect.left_bottom(), top_rect.right_bottom()],
+                Stroke::new(1.0, Color32::from_rgb(45, 48, 58)),
+            );
+
+            let mut header_ui = ui
+                .new_child(egui::UiBuilder::new().max_rect(top_rect.shrink2(Vec2::new(8.0, 4.0))));
+            header_ui.horizontal(|ui| {
+                let is_sheet = self.workspace == WorkspaceMode::SheetLayout;
+                let is_photo = self.workspace == WorkspaceMode::PhotoEdit;
+
+                if ui
+                    .selectable_label(is_sheet, egui::RichText::new("▦  Sheet Layout").strong())
+                    .on_hover_text("Switch to printable sheet layout and photo grid (Tab or 1)")
+                    .clicked()
+                {
+                    self.switch_to_sheet_layout();
+                }
+
+                if ui
+                    .selectable_label(is_photo, egui::RichText::new("✂  Photo Editor").strong())
+                    .on_hover_text("Switch to photo crop and biometric alignment (Tab or 2)")
+                    .clicked()
+                {
+                    self.switch_to_photo_edit();
+                }
+
+                ui.separator();
+
+                match self.workspace {
+                    WorkspaceMode::SheetLayout => {
+                        match self.active_tool {
+                            ToolMode::Select => {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Tool: Select (Click photo slots to inspect)",
+                                    )
+                                    .size(12.0)
+                                    .color(Color32::from_rgb(170, 175, 185)),
+                                );
+                                if let Some(idx) = self.selected_slot {
+                                    ui.separator();
+                                    ui.colored_label(
+                                        Color32::from_rgb(100, 180, 255),
+                                        format!("Slot #{} Selected", idx + 1),
+                                    );
+                                }
+                            }
+                            ToolMode::Pan => {
+                                ui.label(
+                                    egui::RichText::new("Tool: Pan (Drag canvas to move)")
+                                        .size(12.0)
+                                        .color(Color32::from_rgb(170, 175, 185)),
+                                );
+                                ui.separator();
+                                ui.label(format!("Zoom: {:.0}%", self.canvas_zoom * 100.0));
+                                if ui.button("100%").clicked() {
+                                    self.reset_view();
+                                }
+                                if ui.button("Fit Sheet").clicked() {
+                                    self.auto_fit_grid();
+                                }
+                            }
+                            ToolMode::Crop => {
+                                ui.label(
+                                    egui::RichText::new("Tool: Crop (Click Photo Editor to crop)")
+                                        .size(12.0)
+                                        .color(Color32::from_rgb(170, 175, 185)),
+                                );
+                            }
+                        }
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if self.loaded_image.is_some() {
+                                if ui
+                                    .button(egui::RichText::new("✂ Edit Photo Crop").strong())
+                                    .on_hover_text("Switch to Photo Editor workspace")
+                                    .clicked()
+                                {
+                                    self.switch_to_photo_edit();
+                                }
+                            } else if ui.button("Import Photo...").clicked() {
+                                self.import_image_dialog();
+                            }
+                        });
+                    }
+                    WorkspaceMode::PhotoEdit => {
+                        let target_aspect = self.grid_config.photo.aspect_ratio();
+                        ui.label(format!(
+                            "Passport: {} × {} mm ({:.2}:1)",
+                            self.grid_config.photo.width.0,
+                            self.grid_config.photo.height.0,
+                            target_aspect
+                        ));
+
+                        ui.separator();
+                        if let Some(loaded) = &self.loaded_image {
+                            let (w, h) = (loaded.width, loaded.height);
+                            if ui
+                                .button("Max Fit")
+                                .on_hover_text("Fit maximum centered crop box")
+                                .clicked()
+                            {
+                                self.crop_area = CropArea::default_for_aspect(w, h, target_aspect);
+                                self.texture_needs_update = true;
+                            }
+                            if ui
+                                .button("Center")
+                                .on_hover_text("Center crop box")
+                                .clicked()
+                            {
+                                let center_x = (1.0 - self.crop_area.width) / 2.0;
+                                let center_y = (1.0 - self.crop_area.height) / 2.0;
+                                self.crop_area.x = center_x.clamp(0.0, 1.0);
+                                self.crop_area.y = center_y.clamp(0.0, 1.0);
+                                self.crop_area.clamp_within_bounds();
+                                self.texture_needs_update = true;
+                            }
+                        }
+
+                        if ui
+                            .button("Zoom In")
+                            .on_hover_text("Zoom in crop area")
+                            .clicked()
+                        {
+                            self.zoom_crop(0.92);
+                        }
+                        if ui
+                            .button("Zoom Out")
+                            .on_hover_text("Zoom out crop area")
+                            .clicked()
+                        {
+                            self.zoom_crop(1.08);
+                        }
+
+                        ui.separator();
+                        ui.checkbox(&mut self.show_biometric_guides, "Biometric Guides");
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .button(egui::RichText::new("✓ Done (View Sheet)").strong())
+                                .on_hover_text("Apply crop and return to printable sheet grid")
+                                .clicked()
+                            {
+                                self.switch_to_sheet_layout();
+                            }
+                        });
+                    }
+                }
+            });
+
+            match self.workspace {
+                WorkspaceMode::SheetLayout => self.render_sheet_canvas(ui),
+                WorkspaceMode::PhotoEdit => self.render_crop_editor(ui),
             }
         });
     }
@@ -1049,73 +1629,10 @@ impl ImprintApp {
 
         let src_w = src_w_u32 as f32;
         let src_h = src_h_u32 as f32;
-
-        // Top toolbar inside crop editor
-        let bar_h = 42.0;
-        let bar_rect = Rect::from_min_size(rect.min, Vec2::new(rect.width(), bar_h));
-        painter.rect_filled(bar_rect, 0.0, Color32::from_rgb(28, 30, 38));
-        painter.line_segment(
-            [bar_rect.left_bottom(), bar_rect.right_bottom()],
-            Stroke::new(1.0, Color32::from_rgb(45, 48, 58)),
-        );
-
         let target_aspect = self.grid_config.photo.aspect_ratio();
 
-        // Toolbar UI elements
-        let mut child_ui =
-            ui.new_child(egui::UiBuilder::new().max_rect(bar_rect.shrink2(Vec2::new(8.0, 4.0))));
-        child_ui.horizontal(|ui| {
-            ui.strong("✂ Crop Photo");
-            ui.separator();
-            ui.label(format!(
-                "Passport: {} × {} ({:.2}:1)",
-                self.grid_config.photo.width, self.grid_config.photo.height, target_aspect
-            ));
-
-            ui.separator();
-            if ui
-                .button("⚡ Max Fit")
-                .on_hover_text("Fit maximum centered crop box")
-                .clicked()
-            {
-                self.crop_area = CropArea::default_for_aspect(src_w_u32, src_h_u32, target_aspect);
-                self.texture_needs_update = true;
-            }
-            if ui
-                .button("⊙ Center")
-                .on_hover_text("Center crop box")
-                .clicked()
-            {
-                let center_x = (1.0 - self.crop_area.width) / 2.0;
-                let center_y = (1.0 - self.crop_area.height) / 2.0;
-                self.crop_area.x = center_x.clamp(0.0, 1.0);
-                self.crop_area.y = center_y.clamp(0.0, 1.0);
-                self.crop_area.clamp_within_bounds();
-                self.texture_needs_update = true;
-            }
-            if ui.button("🔍+").on_hover_text("Zoom In Crop").clicked() {
-                self.zoom_crop(0.92);
-            }
-            if ui.button("🔍-").on_hover_text("Zoom Out Crop").clicked() {
-                self.zoom_crop(1.08);
-            }
-
-            ui.separator();
-            ui.checkbox(&mut self.show_biometric_guides, "Biometric Face Guides");
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .button(egui::RichText::new("✓ Done (View Sheet)").strong())
-                    .on_hover_text("Apply crop and return to sheet layout")
-                    .clicked()
-                {
-                    self.active_tool = ToolMode::SelectPan;
-                }
-            });
-        });
-
-        // Viewable image workspace area
-        let work_rect = Rect::from_min_max(Pos2::new(rect.min.x, rect.min.y + bar_h), rect.max);
+        // Viewable image workspace area (full canvas without redundant nested bar)
+        let work_rect = rect;
 
         let padding = 36.0;
         let fit_scale = ((work_rect.width() - padding * 2.0).max(10.0) / src_w)
@@ -1459,13 +1976,16 @@ impl ImprintApp {
         // Draw dark workbench canvas background
         painter.rect_filled(rect, 0.0, Color32::from_rgb(30, 32, 38));
 
+        // Printable sheet workspace area (full canvas below unified options header)
+        let work_rect = rect;
+
         // Determine scale: mm to screen pixels
         let sheet_w_mm = self.grid_config.sheet.width.0.max(1.0);
         let sheet_h_mm = self.grid_config.sheet.height.0.max(1.0);
 
         let padding = 40.0;
-        let fit_scale_x = (rect.width() - padding * 2.0).max(10.0) / sheet_w_mm;
-        let fit_scale_y = (rect.height() - padding * 2.0).max(10.0) / sheet_h_mm;
+        let fit_scale_x = (work_rect.width() - padding * 2.0).max(10.0) / sheet_w_mm;
+        let fit_scale_y = (work_rect.height() - padding * 2.0).max(10.0) / sheet_h_mm;
         let base_scale = fit_scale_x.min(fit_scale_y);
         let px_per_mm = base_scale * self.canvas_zoom;
 
@@ -1473,8 +1993,8 @@ impl ImprintApp {
         let sheet_pixel_h = sheet_h_mm * px_per_mm;
 
         // Center of the canvas plus user pan offset
-        let sheet_origin_x = rect.center().x - (sheet_pixel_w / 2.0) + self.canvas_pan.x;
-        let sheet_origin_y = rect.center().y - (sheet_pixel_h / 2.0) + self.canvas_pan.y;
+        let sheet_origin_x = work_rect.center().x - (sheet_pixel_w / 2.0) + self.canvas_pan.x;
+        let sheet_origin_y = work_rect.center().y - (sheet_pixel_h / 2.0) + self.canvas_pan.y;
 
         let sheet_rect = Rect::from_min_size(
             Pos2::new(sheet_origin_x, sheet_origin_y),
@@ -1514,12 +2034,8 @@ impl ImprintApp {
             );
 
             if printable_rect.is_positive() {
-                painter.rect_stroke(
-                    printable_rect,
-                    0.0,
-                    Stroke::new(1.0, Color32::from_rgb(210, 215, 225)),
-                    egui::StrokeKind::Inside,
-                );
+                let margin_stroke = Stroke::new(1.0, Color32::from_rgb(210, 215, 225));
+                painter.rect_stroke(printable_rect, 0.0, margin_stroke, egui::StrokeKind::Inside);
             }
         }
 
@@ -1528,7 +2044,7 @@ impl ImprintApp {
             Ok(layout) => {
                 self.paint_slots(&painter, &sheet_rect, px_per_mm, &layout);
 
-                // Slot click handling: clicking a slot either opens crop tool or imports photo
+                // Slot click handling: clicking a slot selects it or imports photo; double clicking opens Photo Editor
                 if let Some(pos) = response
                     .interact_pointer_pos()
                     .filter(|_| response.clicked())
@@ -1546,7 +2062,9 @@ impl ImprintApp {
                         if slot_rect.contains(pos) {
                             self.selected_slot = Some(idx);
                             if self.loaded_image.is_some() {
-                                self.active_tool = ToolMode::Crop;
+                                if response.double_clicked() {
+                                    self.switch_to_photo_edit();
+                                }
                             } else {
                                 self.import_image_dialog();
                             }
@@ -1649,6 +2167,16 @@ impl ImprintApp {
                 );
             }
 
+            // Selected slot accent outline
+            if Some(idx) == self.selected_slot {
+                painter.rect_stroke(
+                    photo_rect.expand(2.0),
+                    1.0,
+                    Stroke::new(2.0, Color32::from_rgb(0, 160, 255)),
+                    egui::StrokeKind::Outside,
+                );
+            }
+
             // Cut marks at corners
             if self.show_cut_marks {
                 let mark_len = 6.0;
@@ -1682,6 +2210,45 @@ impl ImprintApp {
                 painter.line_segment(
                     [photo_rect.max, photo_rect.max - Vec2::new(0.0, mark_len)],
                     stroke,
+                );
+            }
+
+            // Biometric face guidelines on slots if enabled
+            if self.show_biometric_guides {
+                let bio_stroke = Stroke::new(1.0, Color32::from_rgba_unmultiplied(0, 180, 255, 90));
+                let eye_stroke =
+                    Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 215, 0, 120));
+
+                // Vertical symmetry axis
+                let cx = photo_rect.center().x;
+                painter.line_segment(
+                    [
+                        Pos2::new(cx, photo_rect.min.y),
+                        Pos2::new(cx, photo_rect.max.y),
+                    ],
+                    bio_stroke,
+                );
+
+                // Eye level (~60% from bottom)
+                let y_eyes = photo_rect.max.y - (photo_rect.height() * 0.60);
+                painter.line_segment(
+                    [
+                        Pos2::new(photo_rect.min.x, y_eyes),
+                        Pos2::new(photo_rect.max.x, y_eyes),
+                    ],
+                    eye_stroke,
+                );
+            }
+
+            // Slot dimension annotation tag if enabled
+            if self.show_dimensions && idx == 0 {
+                let dim_text = format!("{} × {} mm", slot.width.0, slot.height.0);
+                painter.text(
+                    Pos2::new(photo_rect.center().x, photo_rect.min.y - 10.0),
+                    egui::Align2::CENTER_BOTTOM,
+                    dim_text,
+                    egui::FontId::proportional(10.0),
+                    Color32::from_rgb(0, 180, 245),
                 );
             }
         }
@@ -1739,11 +2306,12 @@ mod tests {
     #[test]
     fn test_default_app_state() {
         let app = ImprintApp::default();
+        assert_eq!(app.workspace, WorkspaceMode::SheetLayout);
+        assert_eq!(app.active_tool, ToolMode::Select);
         assert_eq!(app.photo_preset, PhotoPreset::UsPassport);
         assert_eq!(app.sheet_preset, SheetPreset::Photo4x6);
         assert_eq!(app.sheet_orientation, SheetOrientation::Portrait);
         assert_eq!(app.dpi, Dpi::STANDARD);
-        assert_eq!(app.active_tool, ToolMode::SelectPan);
         assert!(app.loaded_image.is_none());
         assert_eq!(app.crop_area, CropArea::default());
         assert_eq!(app.export_target, ExportTarget::FullSheet);
@@ -1815,11 +2383,137 @@ mod tests {
     fn test_auto_fit_grid() {
         let mut app = ImprintApp::default();
         app.auto_fit_grid();
-        // On 4x6 inch (101.6 x 152.4 mm) with 2mm margins and 2mm gutters,
-        // fitting 50.8x50.8 mm photos
-        // printable_w = 101.6 - 4 = 97.6 mm -> fits 1 col of 50.8 mm + 2mm gutter? (50.8 * 2 + 2 = 103.6 > 97.6) -> 1 col
-        // printable_h = 152.4 - 4 = 148.4 mm -> fits 2 rows (50.8 * 2 + 2 = 103.6 < 148.4) -> 2 rows
         assert!(app.grid_config.rows >= 1);
         assert!(app.grid_config.cols >= 1);
+    }
+
+    #[test]
+    fn test_workspace_modes_and_switch() {
+        let mut app = ImprintApp::default();
+        assert_eq!(app.workspace, WorkspaceMode::SheetLayout);
+        assert_eq!(app.active_tool, ToolMode::Select);
+
+        app.switch_to_photo_edit();
+        assert_eq!(app.workspace, WorkspaceMode::PhotoEdit);
+        assert_eq!(app.active_tool, ToolMode::Crop);
+
+        app.switch_to_sheet_layout();
+        assert_eq!(app.workspace, WorkspaceMode::SheetLayout);
+        assert_eq!(app.active_tool, ToolMode::Select);
+    }
+
+    #[test]
+    fn test_tool_mode_properties_and_icons() {
+        assert_eq!(ToolMode::Select.shortcut(), "V");
+        assert_eq!(ToolMode::Pan.shortcut(), "H");
+        assert_eq!(ToolMode::Crop.shortcut(), "C");
+
+        assert_eq!(ToolMode::Select.icon(), ToolbarIcon::Pointer);
+        assert_eq!(ToolMode::Pan.icon(), ToolbarIcon::SelectPan);
+        assert_eq!(ToolMode::Crop.icon(), ToolbarIcon::Crop);
+
+        assert!(!ToolMode::Select.description().is_empty());
+        assert!(!ToolMode::Pan.description().is_empty());
+        assert!(!ToolMode::Crop.description().is_empty());
+    }
+
+    #[test]
+    fn test_keyboard_shortcuts_tool_switch() {
+        let mut app = ImprintApp::default();
+        let ctx = egui::Context::default();
+
+        // Simulate pressing 'C' -> switches to PhotoEdit & Crop
+        let mut raw = egui::RawInput::default();
+        raw.events.push(egui::Event::Key {
+            key: egui::Key::C,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+
+        let mut output = ctx.run_ui(raw, |_ui| {});
+        output.textures_delta.clear();
+
+        app.handle_keyboard_shortcuts(&ctx);
+        assert_eq!(app.workspace, WorkspaceMode::PhotoEdit);
+        assert_eq!(app.active_tool, ToolMode::Crop);
+
+        // Simulate pressing 'V' -> switches to SheetLayout & Select
+        let mut raw = egui::RawInput::default();
+        raw.events.push(egui::Event::Key {
+            key: egui::Key::V,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let mut output = ctx.run_ui(raw, |_ui| {});
+        output.textures_delta.clear();
+
+        app.handle_keyboard_shortcuts(&ctx);
+        assert_eq!(app.workspace, WorkspaceMode::SheetLayout);
+        assert_eq!(app.active_tool, ToolMode::Select);
+
+        // Simulate pressing 'Tab' -> switches to PhotoEdit
+        let mut raw = egui::RawInput::default();
+        raw.events.push(egui::Event::Key {
+            key: egui::Key::Tab,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let mut output = ctx.run_ui(raw, |_ui| {});
+        output.textures_delta.clear();
+
+        app.handle_keyboard_shortcuts(&ctx);
+        assert_eq!(app.workspace, WorkspaceMode::PhotoEdit);
+    }
+
+    #[test]
+    fn test_guides_toggle_behavior() {
+        let mut app = ImprintApp::default();
+        assert!(app.show_cut_marks);
+        assert!(app.show_margins);
+        assert!(app.show_dimensions);
+        assert!(app.show_biometric_guides);
+
+        // Pressing 'R' toggles all off
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput::default();
+        raw.events.push(egui::Event::Key {
+            key: egui::Key::R,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let mut output = ctx.run_ui(raw, |_ui| {});
+        output.textures_delta.clear();
+
+        app.handle_keyboard_shortcuts(&ctx);
+        assert!(!app.show_cut_marks);
+        assert!(!app.show_margins);
+        assert!(!app.show_dimensions);
+        assert!(!app.show_biometric_guides);
+
+        // Pressing R again toggles them on
+        let mut raw = egui::RawInput::default();
+        raw.events.push(egui::Event::Key {
+            key: egui::Key::R,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let mut output = ctx.run_ui(raw, |_ui| {});
+        output.textures_delta.clear();
+
+        app.handle_keyboard_shortcuts(&ctx);
+        assert!(app.show_cut_marks);
+        assert!(app.show_margins);
+        assert!(app.show_dimensions);
+        assert!(app.show_biometric_guides);
     }
 }
