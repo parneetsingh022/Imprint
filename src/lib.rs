@@ -4,6 +4,7 @@
 //! grid arrangement, sheet bounds validation, and an interactive egui GUI.
 
 pub mod app;
+pub mod document;
 pub mod export;
 pub mod image_ops;
 pub mod layout;
