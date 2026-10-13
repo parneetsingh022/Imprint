@@ -27,7 +27,7 @@ impl WorkspaceMode {
     pub fn label(self) -> &'static str {
         match self {
             WorkspaceMode::PhotoEdit => "Photo Canvas",
-            WorkspaceMode::SheetLayout => "Sheet Print Preview",
+            WorkspaceMode::SheetLayout => "Grid Mode",
         }
     }
 }
@@ -166,14 +166,14 @@ impl Default for ImprintApp {
             next_doc_id: 0,
             export_target: ExportTarget::FullSheet,
             export_format: ExportFormat::Pdf,
-            active_tool: ToolMode::Crop,
+            active_tool: ToolMode::Select,
             canvas_zoom: 1.0,
             canvas_pan: Vec2::ZERO,
             selected_slot: None,
-            show_margins: true,
-            show_cut_marks: true,
-            show_dimensions: true,
-            show_biometric_guides: true,
+            show_margins: false,
+            show_cut_marks: false,
+            show_dimensions: false,
+            show_biometric_guides: false,
             status_message: "Ready. Import a photo or configure layout to begin.".to_string(),
             show_about_dialog: false,
         }
@@ -220,7 +220,7 @@ impl ImprintApp {
         self.active_doc_idx = self.documents.len() - 1;
         self.sync_active_doc_to_compat();
         self.workspace = WorkspaceMode::PhotoEdit;
-        self.active_tool = ToolMode::Crop;
+        self.active_tool = ToolMode::Select;
         self.status_message = format!(
             "Opened tab: {} ({} × {} px)",
             loaded.file_name, loaded.width, loaded.height
@@ -398,7 +398,7 @@ impl ImprintApp {
             self.workspace = WorkspaceMode::SheetLayout;
             self.active_tool = ToolMode::Select;
             self.texture_needs_update = true;
-            self.status_message = "Workspace: Sheet Print Preview".to_string();
+            self.status_message = "Workspace: Grid Mode".to_string();
 
             // Default to 1 row and 1 column if grid currently overflows the printable sheet
             if compute_layout(&self.grid_config).is_err() {
@@ -412,7 +412,7 @@ impl ImprintApp {
     pub fn switch_to_photo_edit(&mut self) {
         if self.workspace != WorkspaceMode::PhotoEdit {
             self.workspace = WorkspaceMode::PhotoEdit;
-            self.active_tool = ToolMode::Crop;
+            self.active_tool = ToolMode::Select;
             self.status_message = "Workspace: Photo Canvas".to_string();
         }
     }
@@ -692,7 +692,7 @@ impl ImprintApp {
                 };
                 self.export_dialog(target);
             }
-            // Sheet Preview Toggle: ⌘P
+            // Grid Mode Toggle: ⌘P
             else if cmd_or_ctrl && i.key_pressed(egui::Key::P) {
                 if self.workspace == WorkspaceMode::SheetLayout {
                     self.switch_to_photo_edit();
@@ -825,7 +825,7 @@ impl ImprintApp {
                     let sheet_label = if self.workspace == WorkspaceMode::SheetLayout {
                         "Back to Photo Canvas (Esc)"
                     } else {
-                        "Sheet Print Preview (⌘P)"
+                        "Grid Mode (⌘P)"
                     };
                     if ui.button(sheet_label).clicked() {
                         if self.workspace == WorkspaceMode::SheetLayout {
@@ -904,10 +904,14 @@ impl ImprintApp {
                         ui.close();
                     }
                     ui.separator();
-                    ui.checkbox(&mut self.show_margins, "Show Sheet Margins");
-                    ui.checkbox(&mut self.show_cut_marks, "Show Cut Marks");
-                    ui.checkbox(&mut self.show_dimensions, "Show Dimensions");
-                    ui.checkbox(&mut self.show_biometric_guides, "Show Biometric Guides");
+                    if self.workspace == WorkspaceMode::SheetLayout {
+                        ui.checkbox(&mut self.show_margins, "Show Sheet Margins");
+                        ui.checkbox(&mut self.show_cut_marks, "Show Cut Marks");
+                        ui.checkbox(&mut self.show_dimensions, "Show Dimensions");
+                    } else {
+                        ui.checkbox(&mut self.show_biometric_guides, "Show Biometric Guides");
+                        ui.checkbox(&mut self.show_dimensions, "Show Dimensions");
+                    }
                 });
 
                 ui.menu_button("Help", |ui| {
@@ -1120,17 +1124,17 @@ impl ImprintApp {
 
                     render_toolbar_divider(ui);
 
-                    // --- Sheet Print Preview Mode ---
-                    let is_sheet_preview = self.workspace == WorkspaceMode::SheetLayout;
-                    let sheet_resp = render_toolbar_button(
+                    // --- Grid Mode ---
+                    let is_grid_mode = self.workspace == WorkspaceMode::SheetLayout;
+                    let grid_resp = render_toolbar_button(
                         ui,
                         ToolbarIcon::Grid,
-                        is_sheet_preview,
-                        "Sheet Print Preview",
+                        is_grid_mode,
+                        "Grid Mode",
                         Some("⌘P"),
-                        "Preview final printable sheet layout and photo grid",
+                        "Switch to multi-photo grid layout and sheet preview (⌘P)",
                     );
-                    if sheet_resp.clicked() {
+                    if grid_resp.clicked() {
                         if self.workspace == WorkspaceMode::SheetLayout {
                             self.switch_to_photo_edit();
                         } else {
@@ -1156,10 +1160,10 @@ impl ImprintApp {
                     ui.add_space(6.0);
 
                     if self.workspace == WorkspaceMode::SheetLayout {
-                        self.render_select_tool_inspector(ui);
+                        self.render_grid_mode_inspector(ui);
                     } else {
                         match self.active_tool {
-                            ToolMode::Select => self.render_select_tool_inspector(ui),
+                            ToolMode::Select => self.render_photo_select_inspector(ui),
                             ToolMode::Crop => self.render_crop_tool_inspector(ui),
                             ToolMode::Pan => self.render_pan_tool_inspector(ui),
                         }
@@ -1171,10 +1175,10 @@ impl ImprintApp {
     /// Renders the Photoshop-style top header inside the right inspector panel.
     fn render_inspector_header(&mut self, ui: &mut Ui) {
         let (title, shortcut, icon) = if self.workspace == WorkspaceMode::SheetLayout {
-            ("Sheet Print & Export", "⌘P", ToolbarIcon::Grid)
+            ("Grid Mode & Sheet Setup", "⌘P", ToolbarIcon::Grid)
         } else {
             match self.active_tool {
-                ToolMode::Select => ("Selection Inspector", "V", ToolbarIcon::Pointer),
+                ToolMode::Select => ("Photo Selection Inspector", "V", ToolbarIcon::Pointer),
                 ToolMode::Crop => ("Crop Tool Properties", "C", ToolbarIcon::Crop),
                 ToolMode::Pan => ("Canvas Navigator & View", "H", ToolbarIcon::SelectPan),
             }
@@ -1223,8 +1227,8 @@ impl ImprintApp {
         ui.add_space(4.0);
     }
 
-    /// Tool-specific inspector for Selection Tool (V).
-    fn render_select_tool_inspector(&mut self, ui: &mut Ui) {
+    /// Tool-specific inspector for Grid Mode (⌘P) & Sheet Layout.
+    fn render_grid_mode_inspector(&mut self, ui: &mut Ui) {
         // --- 1. Selected Slot & Photo ---
         Self::render_collapsing_section(
             ui,
@@ -1266,8 +1270,8 @@ impl ImprintApp {
                         ui.label(format!("Source: {} × {} px", loaded.width, loaded.height));
                         ui.horizontal(|ui| {
                             if ui
-                                .button("✂ Edit Crop in Photo Editor")
-                                .on_hover_text("Open Photo Editor to frame and align crop")
+                                .button("✂ Edit Crop in Photo Canvas")
+                                .on_hover_text("Open Photo Canvas to frame and align crop")
                                 .clicked()
                             {
                                 self.switch_to_photo_edit();
@@ -1304,8 +1308,8 @@ impl ImprintApp {
                         ));
                         ui.horizontal(|ui| {
                             if ui
-                                .button("✂ Edit Crop in Photo Editor")
-                                .on_hover_text("Switch to Photo Editor workspace")
+                                .button("✂ Edit Crop in Photo Canvas")
+                                .on_hover_text("Switch to Photo Canvas workspace")
                                 .clicked()
                             {
                                 self.switch_to_photo_edit();
@@ -1590,6 +1594,237 @@ impl ImprintApp {
                         Color32::from_rgb(200, 160, 50),
                         "Import a photo to enable export",
                     );
+                }
+            },
+        );
+    }
+
+    /// Tool-specific inspector for Selection Tool (V) on Photo Canvas.
+    fn render_photo_select_inspector(&mut self, ui: &mut Ui) {
+        // --- 1. Active Photograph ---
+        Self::render_collapsing_section(
+            ui,
+            "sec_photo_select_info",
+            "📷 Active Photograph",
+            true,
+            |ui| {
+                if let Some(loaded) = &self.loaded_image {
+                    ui.label(format!("File: {}", loaded.file_name));
+                    ui.label(format!(
+                        "Dimensions: {} × {} px",
+                        loaded.width, loaded.height
+                    ));
+                    let aspect = loaded.width as f32 / loaded.height.max(1) as f32;
+                    ui.label(format!("Aspect Ratio: {:.2} : 1", aspect));
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button("Replace Photo...")
+                            .on_hover_text("Open another photo file to replace current image")
+                            .clicked()
+                        {
+                            self.import_image_dialog();
+                        }
+                        if ui
+                            .button("Remove Photo")
+                            .on_hover_text("Remove photo from current tab")
+                            .clicked()
+                        {
+                            self.loaded_image = None;
+                            self.source_texture = None;
+                            self.cropped_texture = None;
+                            self.status_message = "Photo removed.".to_string();
+                        }
+                    });
+                } else {
+                    ui.colored_label(
+                        Color32::from_rgb(170, 175, 185),
+                        "No photo loaded in current tab.",
+                    );
+                    if ui.button("Import Photo...").clicked() {
+                        self.import_image_dialog();
+                    }
+                }
+            },
+        );
+
+        // --- 2. Passport & ID Photo Standard ---
+        Self::render_collapsing_section(
+            ui,
+            "sec_photo_select_preset",
+            "🛂 Passport & ID Standard",
+            true,
+            |ui| {
+                let old_photo_preset = self.photo_preset;
+                egui::ComboBox::from_label("Photo Preset")
+                    .selected_text(self.photo_preset.short_name())
+                    .show_ui(ui, |ui| {
+                        for preset in PhotoPreset::ALL {
+                            ui.selectable_value(&mut self.photo_preset, *preset, preset.label());
+                        }
+                    });
+                if self.photo_preset != old_photo_preset {
+                    self.apply_photo_preset();
+                }
+
+                ui.horizontal(|ui| {
+                    ui.label("Width (mm):");
+                    let mut w = self.grid_config.photo.width.0;
+                    if ui
+                        .add(egui::DragValue::new(&mut w).speed(0.5).range(5.0..=500.0))
+                        .changed()
+                    {
+                        self.grid_config.photo.width = Millimeters(w);
+                        self.photo_preset = PhotoPreset::Custom;
+                        if let Some(loaded) = &self.loaded_image {
+                            self.crop_area.adjust_aspect(
+                                loaded.width,
+                                loaded.height,
+                                self.grid_config.photo.aspect_ratio(),
+                            );
+                            self.texture_needs_update = true;
+                        }
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Height (mm):");
+                    let mut h = self.grid_config.photo.height.0;
+                    if ui
+                        .add(egui::DragValue::new(&mut h).speed(0.5).range(5.0..=500.0))
+                        .changed()
+                    {
+                        self.grid_config.photo.height = Millimeters(h);
+                        self.photo_preset = PhotoPreset::Custom;
+                        if let Some(loaded) = &self.loaded_image {
+                            self.crop_area.adjust_aspect(
+                                loaded.width,
+                                loaded.height,
+                                self.grid_config.photo.aspect_ratio(),
+                            );
+                            self.texture_needs_update = true;
+                        }
+                    }
+                });
+
+                let aspect = self.grid_config.photo.aspect_ratio();
+                ui.label(format!("Target Aspect: {:.2} : 1", aspect));
+
+                let (px_w, px_h) = self.grid_config.photo.to_pixels(self.dpi);
+                ui.label(format!(
+                    "Print Resolution: {} × {} px @ {}",
+                    px_w, px_h, self.dpi
+                ));
+
+                ui.horizontal(|ui| {
+                    ui.label("Print DPI:");
+                    let old_dpi = self.dpi;
+                    egui::ComboBox::from_id_salt("photo_select_dpi")
+                        .selected_text(format!("{}", self.dpi))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.dpi, Dpi::DRAFT, "150 DPI (Draft)");
+                            ui.selectable_value(
+                                &mut self.dpi,
+                                Dpi::STANDARD,
+                                "300 DPI (Standard Print)",
+                            );
+                            ui.selectable_value(
+                                &mut self.dpi,
+                                Dpi::HIGH,
+                                "600 DPI (High Resolution)",
+                            );
+                        });
+                    if self.dpi != old_dpi {
+                        self.texture_needs_update = true;
+                    }
+                });
+            },
+        );
+
+        // --- 3. View Overlays & Guidelines ---
+        Self::render_collapsing_section(
+            ui,
+            "sec_photo_select_overlays",
+            "📐 Photo View Overlays",
+            true,
+            |ui| {
+                ui.checkbox(&mut self.show_biometric_guides, "Biometric Face Guidelines");
+                ui.checkbox(&mut self.show_dimensions, "Dimensions Annotation");
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Enable Both").clicked() {
+                        self.show_biometric_guides = true;
+                        self.show_dimensions = true;
+                    }
+                    if ui.button("Disable Both").clicked() {
+                        self.show_biometric_guides = false;
+                        self.show_dimensions = false;
+                    }
+                });
+            },
+        );
+
+        // --- 4. Export Single Photo ---
+        Self::render_collapsing_section(
+            ui,
+            "sec_photo_select_export",
+            "📤 Export Single Photo",
+            false,
+            |ui| {
+                egui::ComboBox::from_id_salt("photo_select_export_format")
+                    .selected_text(self.export_format.label())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.export_format,
+                            ExportFormat::Pdf,
+                            ExportFormat::Pdf.label(),
+                        );
+                        ui.selectable_value(
+                            &mut self.export_format,
+                            ExportFormat::Png,
+                            ExportFormat::Png.label(),
+                        );
+                        ui.selectable_value(
+                            &mut self.export_format,
+                            ExportFormat::Jpeg,
+                            ExportFormat::Jpeg.label(),
+                        );
+                    });
+                let (px_w, px_h) = self.grid_config.photo.to_pixels(self.dpi);
+                ui.label(format!("Resolution: {} × {} px @ {}", px_w, px_h, self.dpi));
+                let has_photo = self.loaded_image.is_some();
+                let btn = egui::Button::new(egui::RichText::new("Export Single Photo...").strong());
+                if ui.add_enabled(has_photo, btn).clicked() {
+                    self.export_dialog(ExportTarget::SinglePhoto);
+                }
+                if !has_photo {
+                    ui.colored_label(
+                        Color32::from_rgb(200, 160, 50),
+                        "Import a photo to enable export",
+                    );
+                }
+            },
+        );
+
+        // --- 5. Quick Tools & Navigation ---
+        Self::render_collapsing_section(
+            ui,
+            "sec_photo_select_quick",
+            "🛠 Quick Tools & Navigation",
+            true,
+            |ui| {
+                if ui
+                    .button("✂ Crop Tool [C] (Frame & Align Crop)")
+                    .on_hover_text("Switch to Crop Tool to frame photo with passport proportions")
+                    .clicked()
+                {
+                    self.active_tool = ToolMode::Crop;
+                }
+                if ui
+                    .button("▦ Switch to Grid Mode [⌘P] (Arrange Sheet)")
+                    .on_hover_text("Switch to multi-photo grid layout and sheet preview")
+                    .clicked()
+                {
+                    self.switch_to_sheet_layout();
                 }
             },
         );
@@ -1906,8 +2141,8 @@ impl ImprintApp {
 
         ui.add_space(8.0);
         if ui
-            .button(egui::RichText::new("✓ Done (Apply to Sheet Layout) ➔").strong())
-            .on_hover_text("Return to printable sheet grid")
+            .button(egui::RichText::new("▦ Open in Grid Mode (⌘P) ➔").strong())
+            .on_hover_text("Open multi-photo printable grid mode")
             .clicked()
         {
             self.switch_to_sheet_layout();
@@ -1943,14 +2178,8 @@ impl ImprintApp {
                         match self.workspace {
                             WorkspaceMode::SheetLayout => self.auto_fit_grid(),
                             WorkspaceMode::PhotoEdit => {
-                                if let Some(loaded) = &self.loaded_image {
-                                    self.crop_area = CropArea::default_for_aspect(
-                                        loaded.width,
-                                        loaded.height,
-                                        self.grid_config.photo.aspect_ratio(),
-                                    );
-                                    self.texture_needs_update = true;
-                                }
+                                self.canvas_zoom = 1.0;
+                                self.canvas_pan = Vec2::ZERO;
                             }
                         }
                     }
@@ -1977,32 +2206,52 @@ impl ImprintApp {
             true,
             |ui| {
                 ui.label(format!("Workspace: {}", self.workspace.label()));
-                ui.label(format!(
-                    "Sheet Dimensions: {:.1} × {:.1} mm ({:.1} × {:.1} in)",
-                    self.grid_config.sheet.width.0,
-                    self.grid_config.sheet.height.0,
-                    self.grid_config.sheet.width.to_inches().0,
-                    self.grid_config.sheet.height.to_inches().0
-                ));
-                ui.label(format!(
-                    "Photo Size: {:.1} × {:.1} mm",
-                    self.grid_config.photo.width.0, self.grid_config.photo.height.0
-                ));
-                ui.label(format!("Resolution: {}", self.dpi));
+                if self.workspace == WorkspaceMode::SheetLayout {
+                    ui.label(format!(
+                        "Sheet Dimensions: {:.1} × {:.1} mm ({:.1} × {:.1} in)",
+                        self.grid_config.sheet.width.0,
+                        self.grid_config.sheet.height.0,
+                        self.grid_config.sheet.width.to_inches().0,
+                        self.grid_config.sheet.height.to_inches().0
+                    ));
+                    ui.label(format!(
+                        "Photo Size: {:.1} × {:.1} mm",
+                        self.grid_config.photo.width.0, self.grid_config.photo.height.0
+                    ));
+                    ui.label(format!("Resolution: {}", self.dpi));
 
-                match compute_layout(&self.grid_config) {
-                    Ok(layout) => {
-                        ui.colored_label(
-                            Color32::from_rgb(46, 160, 67),
-                            format!("✓ Layout Fit: {} photos fitting on sheet", layout.count()),
-                        );
+                    match compute_layout(&self.grid_config) {
+                        Ok(layout) => {
+                            ui.colored_label(
+                                Color32::from_rgb(46, 160, 67),
+                                format!("✓ Layout Fit: {} photos fitting on sheet", layout.count()),
+                            );
+                        }
+                        Err(err) => {
+                            ui.colored_label(
+                                Color32::from_rgb(230, 80, 70),
+                                format!("⚠ Layout Overflow:\n{err}"),
+                            );
+                        }
                     }
-                    Err(err) => {
-                        ui.colored_label(
-                            Color32::from_rgb(230, 80, 70),
-                            format!("⚠ Layout Overflow:\n{err}"),
-                        );
+                } else {
+                    if let Some(loaded) = &self.loaded_image {
+                        ui.label(format!("Photo: {}", loaded.file_name));
+                        ui.label(format!(
+                            "Dimensions: {} × {} px",
+                            loaded.width, loaded.height
+                        ));
+                    } else {
+                        ui.label("Photo: None loaded");
                     }
+                    ui.label(format!(
+                        "Passport Standard: {} ({:.1} × {:.1} mm)",
+                        self.photo_preset.short_name(),
+                        self.grid_config.photo.width.0,
+                        self.grid_config.photo.height.0
+                    ));
+                    let (px_w, px_h) = self.grid_config.photo.to_pixels(self.dpi);
+                    ui.label(format!("Resolution: {} × {} px @ {}", px_w, px_h, self.dpi));
                 }
             },
         );
@@ -2014,31 +2263,38 @@ impl ImprintApp {
             "📐 View Overlays & Guides",
             true,
             |ui| {
-                ui.checkbox(&mut self.show_cut_marks, "Corner Cut Marks");
-                ui.checkbox(&mut self.show_margins, "Sheet Margins");
-                ui.checkbox(&mut self.show_dimensions, "Dimensions Annotation");
-                if self.workspace == WorkspaceMode::PhotoEdit {
+                if self.workspace == WorkspaceMode::SheetLayout {
+                    ui.checkbox(&mut self.show_cut_marks, "Corner Cut Marks");
+                    ui.checkbox(&mut self.show_margins, "Sheet Margins");
+                    ui.checkbox(&mut self.show_dimensions, "Dimensions Annotation");
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Enable All").clicked() {
+                            self.show_cut_marks = true;
+                            self.show_margins = true;
+                            self.show_dimensions = true;
+                        }
+                        if ui.button("Disable All").clicked() {
+                            self.show_cut_marks = false;
+                            self.show_margins = false;
+                            self.show_dimensions = false;
+                        }
+                    });
+                } else {
                     ui.checkbox(&mut self.show_biometric_guides, "Biometric Face Guides");
-                }
-                ui.add_space(2.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Enable All").clicked() {
-                        self.show_cut_marks = true;
-                        self.show_margins = true;
-                        self.show_dimensions = true;
-                        if self.workspace == WorkspaceMode::PhotoEdit {
+                    ui.checkbox(&mut self.show_dimensions, "Dimensions Annotation");
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Enable All").clicked() {
                             self.show_biometric_guides = true;
+                            self.show_dimensions = true;
                         }
-                    }
-                    if ui.button("Disable All").clicked() {
-                        self.show_cut_marks = false;
-                        self.show_margins = false;
-                        self.show_dimensions = false;
-                        if self.workspace == WorkspaceMode::PhotoEdit {
+                        if ui.button("Disable All").clicked() {
                             self.show_biometric_guides = false;
+                            self.show_dimensions = false;
                         }
-                    }
-                });
+                    });
+                }
             },
         );
 
@@ -2049,19 +2305,33 @@ impl ImprintApp {
             "🛠 Switch to Edit Tool",
             true,
             |ui| {
-                if ui
-                    .button("Select Tool [V] (Inspect Photo Slots & Grid)")
-                    .clicked()
-                {
-                    self.switch_to_sheet_layout();
-                    self.active_tool = ToolMode::Select;
-                }
-                if ui
-                    .button("Crop Tool [C] (Frame & Align Photo Crop)")
-                    .clicked()
-                {
-                    self.switch_to_photo_edit();
-                    self.active_tool = ToolMode::Crop;
+                if self.workspace == WorkspaceMode::SheetLayout {
+                    if ui
+                        .button("Select Tool [V] (Inspect Photo Slots & Grid)")
+                        .clicked()
+                    {
+                        self.active_tool = ToolMode::Select;
+                    }
+                    if ui
+                        .button("Crop Tool [C] (Switch to Photo Canvas to crop)")
+                        .clicked()
+                    {
+                        self.switch_to_photo_edit();
+                        self.active_tool = ToolMode::Crop;
+                    }
+                } else {
+                    if ui.button("Select Tool [V] (Photo Inspector)").clicked() {
+                        self.active_tool = ToolMode::Select;
+                    }
+                    if ui
+                        .button("Crop Tool [C] (Frame & Align Photo Crop)")
+                        .clicked()
+                    {
+                        self.active_tool = ToolMode::Crop;
+                    }
+                    if ui.button("▦ Grid Mode [⌘P] (Arrange Sheet)").clicked() {
+                        self.switch_to_sheet_layout();
+                    }
                 }
             },
         );
@@ -2069,12 +2339,12 @@ impl ImprintApp {
 
     /// Properties inspector for Printable Sheet Layout workspace (backward compatibility).
     pub fn render_sheet_properties(&mut self, ui: &mut Ui) {
-        self.render_select_tool_inspector(ui);
+        self.render_grid_mode_inspector(ui);
     }
 
     /// Properties inspector for Single Photo Editor workspace (backward compatibility).
     pub fn render_photo_properties(&mut self, ui: &mut Ui) {
-        self.render_crop_tool_inspector(ui);
+        self.render_photo_select_inspector(ui);
     }
 
     /// Renders the bottom status bar.
@@ -2308,13 +2578,11 @@ impl ImprintApp {
                 } else {
                     let preview_btn = ui
                         .add(egui::Button::new(
-                            egui::RichText::new("Sheet Preview & Print (⌘P)")
+                            egui::RichText::new("Grid Mode (⌘P)")
                                 .color(Color32::from_rgb(100, 190, 255))
                                 .strong(),
                         ))
-                        .on_hover_text(
-                            "Preview printable sheet layout with photo grid and cut marks (⌘P)",
-                        )
+                        .on_hover_text("Switch to multi-photo grid layout and sheet preview (⌘P)")
                         .on_hover_cursor(egui::CursorIcon::PointingHand);
                     if preview_btn.clicked() {
                         self.switch_to_sheet_layout();
@@ -2510,7 +2778,7 @@ impl ImprintApp {
                 },
                 WorkspaceMode::SheetLayout => {
                     ui.label(
-                        egui::RichText::new("Printable Sheet Preview:")
+                        egui::RichText::new("Grid Mode:")
                             .strong()
                             .size(11.5),
                     );
@@ -3495,7 +3763,7 @@ mod tests {
     fn test_default_app_state() {
         let app = ImprintApp::default();
         assert_eq!(app.workspace, WorkspaceMode::PhotoEdit);
-        assert_eq!(app.active_tool, ToolMode::Crop);
+        assert_eq!(app.active_tool, ToolMode::Select);
         assert_eq!(app.photo_preset, PhotoPreset::UsPassport);
         assert_eq!(app.sheet_preset, SheetPreset::Photo4x6);
         assert_eq!(app.sheet_orientation, SheetOrientation::Portrait);
@@ -3508,6 +3776,10 @@ mod tests {
         assert_eq!(app.export_target, ExportTarget::FullSheet);
         assert_eq!(app.export_format, ExportFormat::Pdf);
         assert_eq!(app.documents.len(), 0);
+        assert!(!app.show_cut_marks);
+        assert!(!app.show_margins);
+        assert!(!app.show_dimensions);
+        assert!(!app.show_biometric_guides);
         assert!(!app.can_undo());
         assert!(!app.can_redo());
     }
@@ -3585,7 +3857,7 @@ mod tests {
     fn test_workspace_modes_and_switch() {
         let mut app = ImprintApp::default();
         assert_eq!(app.workspace, WorkspaceMode::PhotoEdit);
-        assert_eq!(app.active_tool, ToolMode::Crop);
+        assert_eq!(app.active_tool, ToolMode::Select);
 
         app.switch_to_sheet_layout();
         assert_eq!(app.workspace, WorkspaceMode::SheetLayout);
@@ -3593,7 +3865,7 @@ mod tests {
 
         app.switch_to_photo_edit();
         assert_eq!(app.workspace, WorkspaceMode::PhotoEdit);
-        assert_eq!(app.active_tool, ToolMode::Crop);
+        assert_eq!(app.active_tool, ToolMode::Select);
     }
 
     #[test]
@@ -3687,13 +3959,31 @@ mod tests {
     #[test]
     fn test_guides_toggle_behavior() {
         let mut app = ImprintApp::default();
+        assert!(!app.show_cut_marks);
+        assert!(!app.show_margins);
+        assert!(!app.show_dimensions);
+        assert!(!app.show_biometric_guides);
+
+        // Pressing 'R' toggles all on (since initially all are disabled)
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput::default();
+        raw.events.push(egui::Event::Key {
+            key: egui::Key::R,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let mut output = ctx.run_ui(raw, |_ui| {});
+        output.textures_delta.clear();
+
+        app.handle_keyboard_shortcuts(&ctx);
         assert!(app.show_cut_marks);
         assert!(app.show_margins);
         assert!(app.show_dimensions);
         assert!(app.show_biometric_guides);
 
-        // Pressing 'R' toggles all off
-        let ctx = egui::Context::default();
+        // Pressing R again toggles them back off
         let mut raw = egui::RawInput::default();
         raw.events.push(egui::Event::Key {
             key: egui::Key::R,
@@ -3710,24 +4000,20 @@ mod tests {
         assert!(!app.show_margins);
         assert!(!app.show_dimensions);
         assert!(!app.show_biometric_guides);
+    }
 
-        // Pressing R again toggles them on
-        let mut raw = egui::RawInput::default();
-        raw.events.push(egui::Event::Key {
-            key: egui::Key::R,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::NONE,
-        });
-        let mut output = ctx.run_ui(raw, |_ui| {});
-        output.textures_delta.clear();
+    #[test]
+    fn test_loading_image_defaults_to_select_tool_not_crop() {
+        let mut app = ImprintApp::default();
+        assert_eq!(app.active_tool, ToolMode::Select);
 
-        app.handle_keyboard_shortcuts(&ctx);
-        assert!(app.show_cut_marks);
-        assert!(app.show_margins);
-        assert!(app.show_dimensions);
-        assert!(app.show_biometric_guides);
+        let img = DynamicImage::new_rgb8(1000, 1000);
+        let loaded = LoadedImage::from_dynamic_image(img, "test.jpg");
+        app.add_document(loaded);
+
+        // Loading an image must keep tool as Select, not Crop
+        assert_eq!(app.workspace, WorkspaceMode::PhotoEdit);
+        assert_eq!(app.active_tool, ToolMode::Select);
     }
 
     #[test]
@@ -3924,12 +4210,12 @@ mod tests {
     }
 
     #[test]
-    fn test_cmd_p_shortcut_toggles_sheet_preview() {
+    fn test_cmd_p_shortcut_toggles_grid_mode() {
         let mut app = ImprintApp::default();
         let ctx = egui::Context::default();
         assert_eq!(app.workspace, WorkspaceMode::PhotoEdit);
 
-        // Press ⌘P to toggle to Sheet Print Preview
+        // Press ⌘P to toggle to Grid Mode
         let mut raw = egui::RawInput::default();
         raw.events.push(egui::Event::Key {
             key: egui::Key::P,
@@ -4240,6 +4526,54 @@ mod tests {
         let mut out = ctx.run_ui(raw, |ui| {
             app.render_document_tab_bar(ui);
             app.render_canvas_options_bar(ui);
+        });
+        out.textures_delta.clear();
+    }
+
+    #[test]
+    fn test_grid_mode_label_and_inspector_separation() {
+        assert_eq!(WorkspaceMode::SheetLayout.label(), "Grid Mode");
+        assert_eq!(WorkspaceMode::PhotoEdit.label(), "Photo Canvas");
+
+        let mut app = ImprintApp::default();
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 800.0));
+
+        // 1. Normal mode (PhotoEdit) with ToolMode::Select
+        app.workspace = WorkspaceMode::PhotoEdit;
+        app.active_tool = ToolMode::Select;
+        let raw = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(raw, |ui| {
+            app.render_properties_panel(ui);
+            app.render_inspector_header(ui);
+        });
+        out.textures_delta.clear();
+
+        // 2. Normal mode (PhotoEdit) with ToolMode::Pan
+        app.workspace = WorkspaceMode::PhotoEdit;
+        app.active_tool = ToolMode::Pan;
+        let raw = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(raw, |ui| {
+            app.render_properties_panel(ui);
+            app.render_inspector_header(ui);
+        });
+        out.textures_delta.clear();
+
+        // 3. Grid Mode (SheetLayout)
+        app.workspace = WorkspaceMode::SheetLayout;
+        let raw = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(raw, |ui| {
+            app.render_properties_panel(ui);
+            app.render_inspector_header(ui);
         });
         out.textures_delta.clear();
     }
