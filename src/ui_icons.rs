@@ -30,6 +30,10 @@ pub enum ToolbarIcon {
     Zoom100,
     /// Fit sheet canvas to viewport (Frame with 4 outward expansion corners).
     FitScreen,
+    /// Undo previous edit (counter-clockwise arched arrow pointing left).
+    Undo,
+    /// Redo reverted edit (clockwise arched arrow pointing right).
+    Redo,
 }
 
 /// Renders a crisp vector icon into the given painter centered at `center`.
@@ -510,6 +514,38 @@ pub fn draw_toolbar_icon(
                 bracket_stroke,
             );
         }
+
+        ToolbarIcon::Undo => {
+            // Arched counter-clockwise arrow pointing left
+            let stroke = Stroke::new(1.6 * s, color);
+            let tip = center + Vec2::new(-6.0 * s, -2.5 * s);
+            painter.line_segment([tip, tip + Vec2::new(3.5 * s, -3.5 * s)], stroke);
+            painter.line_segment([tip, tip + Vec2::new(3.5 * s, 3.5 * s)], stroke);
+
+            let p0 = tip + Vec2::new(1.0 * s, 0.0);
+            let p1 = center + Vec2::new(2.0 * s, -3.5 * s);
+            let p2 = center + Vec2::new(6.0 * s, 1.0 * s);
+            let p3 = center + Vec2::new(4.0 * s, 6.0 * s);
+            painter.line_segment([p0, p1], stroke);
+            painter.line_segment([p1, p2], stroke);
+            painter.line_segment([p2, p3], stroke);
+        }
+
+        ToolbarIcon::Redo => {
+            // Arched clockwise arrow pointing right
+            let stroke = Stroke::new(1.6 * s, color);
+            let tip = center + Vec2::new(6.0 * s, -2.5 * s);
+            painter.line_segment([tip, tip + Vec2::new(-3.5 * s, -3.5 * s)], stroke);
+            painter.line_segment([tip, tip + Vec2::new(-3.5 * s, 3.5 * s)], stroke);
+
+            let p0 = tip - Vec2::new(1.0 * s, 0.0);
+            let p1 = center + Vec2::new(-2.0 * s, -3.5 * s);
+            let p2 = center + Vec2::new(-6.0 * s, 1.0 * s);
+            let p3 = center + Vec2::new(-4.0 * s, 6.0 * s);
+            painter.line_segment([p0, p1], stroke);
+            painter.line_segment([p1, p2], stroke);
+            painter.line_segment([p2, p3], stroke);
+        }
     }
 }
 
@@ -586,6 +622,106 @@ pub fn render_toolbar_button(
                     .color(Color32::from_rgb(180, 185, 195)),
             );
         }
+    })
+}
+
+/// Renders an options bar button with a vector icon, text label, and hover styling.
+pub fn render_options_bar_button(
+    ui: &mut Ui,
+    icon: Option<ToolbarIcon>,
+    text: &str,
+    enabled: bool,
+    tooltip: &str,
+) -> Response {
+    let height = 22.0;
+    let font_id = egui::FontId::proportional(11.5);
+    let text_color = if enabled {
+        Color32::from_rgb(220, 225, 235)
+    } else {
+        Color32::from_rgb(105, 110, 120)
+    };
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_string(), font_id, text_color);
+
+    let pad = 6.0;
+    let icon_w = if icon.is_some() { 16.0 } else { 0.0 };
+    let spacing = if icon.is_some() && !text.is_empty() {
+        3.0
+    } else {
+        0.0
+    };
+    let total_w = pad * 2.0 + icon_w + spacing + galley.size().x;
+
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(total_w, height), egui::Sense::click());
+
+    let painter = ui.painter();
+    if enabled {
+        let (bg, stroke) = if response.is_pointer_button_down_on() {
+            (
+                Color32::from_rgb(32, 34, 42),
+                Stroke::new(1.0, Color32::from_rgb(80, 85, 95)),
+            )
+        } else if response.hovered() {
+            (
+                Color32::from_rgb(46, 50, 60),
+                Stroke::new(1.0, Color32::from_rgb(72, 78, 90)),
+            )
+        } else {
+            (
+                Color32::from_rgb(36, 38, 46),
+                Stroke::new(1.0, Color32::from_rgb(52, 56, 66)),
+            )
+        };
+        painter.rect(rect, 3.0, bg, stroke, StrokeKind::Inside);
+
+        let icon_color = if response.hovered() {
+            Color32::WHITE
+        } else {
+            Color32::from_rgb(205, 210, 220)
+        };
+        let mut x_cursor = rect.min.x + pad;
+        if let Some(ic) = icon {
+            let icon_center = Pos2::new(x_cursor + icon_w / 2.0, rect.center().y);
+            draw_toolbar_icon(painter, ic, icon_center, icon_color, 13.0);
+            x_cursor += icon_w + spacing;
+        }
+
+        let text_color = if response.hovered() {
+            Color32::WHITE
+        } else {
+            Color32::from_rgb(220, 225, 235)
+        };
+        let text_pos = Pos2::new(x_cursor, rect.center().y - galley.size().y / 2.0);
+        painter.galley(text_pos, galley, text_color);
+    } else {
+        painter.rect(
+            rect,
+            3.0,
+            Color32::from_rgb(26, 28, 34),
+            Stroke::new(1.0, Color32::from_rgb(38, 40, 48)),
+            StrokeKind::Inside,
+        );
+        let mut x_cursor = rect.min.x + pad;
+        if let Some(ic) = icon {
+            let icon_center = Pos2::new(x_cursor + icon_w / 2.0, rect.center().y);
+            draw_toolbar_icon(
+                painter,
+                ic,
+                icon_center,
+                Color32::from_rgb(75, 80, 90),
+                13.0,
+            );
+            x_cursor += icon_w + spacing;
+        }
+        let text_pos = Pos2::new(x_cursor, rect.center().y - galley.size().y / 2.0);
+        painter.galley(text_pos, galley, Color32::from_rgb(85, 90, 100));
+    }
+
+    response.on_hover_text(tooltip).on_hover_cursor(if enabled {
+        egui::CursorIcon::PointingHand
+    } else {
+        egui::CursorIcon::NotAllowed
     })
 }
 

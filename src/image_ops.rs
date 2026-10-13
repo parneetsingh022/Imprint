@@ -358,6 +358,21 @@ pub fn crop_and_resample(
     Ok(resized)
 }
 
+/// Extracts the cropped region from `original` into a new `DynamicImage`.
+pub fn crop_to_dynamic_image(
+    original: &DynamicImage,
+    crop: &CropArea,
+) -> Result<DynamicImage, ImageOpsError> {
+    let (src_w, src_h) = original.dimensions();
+    if src_w == 0 || src_h == 0 {
+        return Err(ImageOpsError::InvalidCropArea);
+    }
+
+    let (px_x, px_y, px_w, px_h) = crop.to_pixel_rect(src_w, src_h);
+    let sub = ::image::imageops::crop_imm(original, px_x, px_y, px_w, px_h).to_image();
+    Ok(DynamicImage::ImageRgba8(sub))
+}
+
 /// Converts an RGBA image into an `egui::ColorImage` for GPU rendering in egui.
 pub fn to_egui_color_image(img: &RgbaImage) -> eframe::egui::ColorImage {
     let size = [img.width() as usize, img.height() as usize];
@@ -444,5 +459,14 @@ mod tests {
         assert!((initial_bottom_right.0 - new_bottom_right.0).abs() < 1e-4);
         assert!((initial_bottom_right.1 - new_bottom_right.1).abs() < 1e-4);
         assert!((crop.width / crop.height - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_crop_to_dynamic_image() {
+        let original = DynamicImage::ImageRgba8(RgbaImage::new(100, 100));
+        let crop = CropArea::new(0.2, 0.2, 0.5, 0.5);
+        let result = crop_to_dynamic_image(&original, &crop).expect("Crop must succeed");
+        assert_eq!(result.width(), 50);
+        assert_eq!(result.height(), 50);
     }
 }
